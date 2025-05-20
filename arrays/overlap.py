@@ -1,10 +1,12 @@
 import logging
+import cv2
 import numpy as np
 
-from emprocess.utils.transform import rotate_image  
+from emprocess.utils.transform import rotate_image
+from emprocess.utils.mask import mask_to_bbox  
 
 from .sift import estimate_transform_sift
-from .utils import compute_laplacian_var_diff
+from .utils import compute_laplacian_var_diff, homogenize_arrays_shape, xy_offset_to_pad
 
 
 def get_overlap(img1, img2, offset, rotation=0, pad=0, homogenize_shapes=False):
@@ -43,6 +45,25 @@ def get_overlap(img1, img2, offset, rotation=0, pad=0, homogenize_shapes=False):
         crop2 = crop2[:y,:x]
 
     return crop1, crop2
+
+
+def get_overlap_warp(ref_img, mov_img, ref_mask, mov_mask, M, mov_img_shape, ref_img_offset):
+    
+    mov_img = cv2.warpAffine(mov_img, M, mov_img_shape[::-1])  
+    ref_mask = cv2.warpAffine(ref_mask.astype(np.uint8), M, mov_img_shape[::-1]).astype(bool)
+
+    # Pad moving image so it matches the reference
+    ref_img = np.pad(ref_img, xy_offset_to_pad(ref_img_offset))
+    mov_mask = np.pad(mov_mask, xy_offset_to_pad(ref_img_offset))
+
+    # Make sure that images have the same shape for sofima
+    mov_img, ref_img = homogenize_arrays_shape([mov_img, ref_img])
+    ref_mask, mov_mask = homogenize_arrays_shape([ref_mask, mov_mask])
+
+    mask = ref_mask & mov_mask
+    y1,y2,x1,x2 = mask_to_bbox(mask)
+
+    return ref_img[y1:y2, x1:x2], mov_img[y1:y2, x1:x2]
 
 
 def check_overlap(img1, 

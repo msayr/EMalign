@@ -1,4 +1,5 @@
 import json
+from emalign.arrays.overlap import get_overlap
 import networkx as nx
 import numpy as np
 import os
@@ -203,7 +204,7 @@ def find_overlapping_stacks(dataset_paths):
 
 
 def create_configs_fused_stacks(overlapping_stacks, 
-                                scale=0.1):
+                                scale=0.2):
     
     '''Create configurations for overlapping stacks.
 
@@ -211,7 +212,7 @@ def create_configs_fused_stacks(overlapping_stacks,
 
     Args:
         overlapping_stacks (list): List of stacks with the same Z offset, potentially overlapping on the XY plane.
-        scale (`float`, optional): Scale to use to downsample images when determining offset with SIFT. Defaults to 0.1. 
+        scale (`float`, optional): Scale to use to downsample images when determining offset with SIFT. Defaults to 0.2. 
 
     Returns:
         fuse_configs (`list` of `dict`): List of dictionaries of configuration of the stacks.\n
@@ -223,7 +224,7 @@ def create_configs_fused_stacks(overlapping_stacks,
     '''
 
     first_slices = {}
-    overlap_G = nx.DiGraph()
+    overlap_G = nx.Graph()
 
     for dataset in overlapping_stacks:
         z = 0
@@ -241,50 +242,21 @@ def create_configs_fused_stacks(overlapping_stacks,
     for stack1, stack2 in tqdm(list(combinations(first_slices.keys(), 2))):
         img1 = first_slices[stack1][1]
         img2 = first_slices[stack2][1]
-        offset, angle, valid_estimate = estimate_transform_sift(img1, img2, scale)
+        _, _, _, valid_estimate = estimate_transform_sift(img1, img2, scale, refine_estimate=True)
 
         if valid_estimate:
-            overlap_G.add_edge(stack1, stack2, offset=-offset, angle=-angle)
-            overlap_G.add_edge(stack2, stack1, offset=offset, angle=angle)
+            overlap_G.add_edge(stack1, stack2)
 
+    # Group by group, depth first search to make sure we connect all images properly
     fuse_configs = []
-    for group in nx.connected_components(nx.to_undirected(overlap_G)):
+    for group in nx.connected_components(overlap_G):
         if len(group) == 1:
             continue
-
-        abs_positions = {}
-        abs_rotations = {}
-
-        G = overlap_G.subgraph(group)
-        start_node = list(group)[0]
-        abs_positions[start_node] = np.array([0,0])
-        abs_rotations[start_node] = 0
-
-        for node in nx.bfs_tree(G, start_node):
-            if node == start_node:
-                continue
-
-            path = nx.shortest_path(G, start_node, node)
         
-            cumulative_rotation = 0
-            cumulative_position = np.array([0,0])
-            for i in range(len(path)-1):
-                u,v = path[i], path[i+1]
-                cumulative_rotation = (cumulative_rotation + G[u][v]['angle']) % 360
-                cumulative_rotation = cumulative_rotation if cumulative_rotation<=180 else -180 + (cumulative_rotation % 180)
-                cumulative_position = (cumulative_position + G[u][v]['offset'])
-            abs_rotations[node] = cumulative_rotation
-            abs_positions[node] = cumulative_position
-
-        min_rotation = min(list(abs_rotations.values()))
-        min_position = np.min(list(abs_positions.values()), axis=0)
-        abs_rotations = {k:v-min_rotation for k,v in abs_rotations.items()}
-        abs_positions = {k:v-min_position for k,v in abs_positions.items()}
-
-        fuse_configs.append({
-                    n: {'path': G.nodes[n]['path'],
-                        'z_offset': int(G.nodes[n]['z']),
-                        'xy_offset': list(map(int, -abs_positions[n])),
-                        'rotation': float(abs_rotations[n])} 
-                        for n in G.nodes})
+        G = overlap_G.subgraph(group)
+        fuse_configs.append({n: {
+                                'path': G.nodes[n]['path'],
+                                'z_offset': int(G.nodes[n]['z'])
+                                } 
+                                for n in nx.dfs_tree(G)})
     return fuse_configs

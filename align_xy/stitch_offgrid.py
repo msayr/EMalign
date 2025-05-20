@@ -3,6 +3,7 @@ Functions for stitching images existing on the same XY plane.
 Contrary to tilemaps, these functions are for images that are not on a predictable grid. 
 '''
 
+import cv2
 import numpy as np
 import jax.numpy as jnp
 
@@ -62,7 +63,8 @@ def render_fused_slice(pre,
                        parallelism=1,
                        output_shape=None,
                        post_on_top=False,
-                       resize_canvas=True
+                       resize_canvas=True,
+                       
                        ):
     
     y1,y2,x1,x2 = bbox_post
@@ -123,33 +125,46 @@ def stitch_images(img1,
                   stride=40,
                   parallelism=1,
                   img_on_top='auto',
-                  img_q_fun=_compute_laplacian_var,
+                  img_q_fun=None,
                   resize_canvas=True,
                   **kwargs):
     
-    '''
-    Stitch two images on the same slice. Img1 is the reference, img2 is the moving image.
+    '''Stitch two images on the same slice. 
+    
+    Img1 is the reference, img2 is the moving image.
+    Img1 is the one being rotated and offset when necessary, because the rotation would result in a staircase artifact at the boundaries of the mesh.
 
     img_q_fun: function taking image and mask as arguments, returns a value higher for higher quality/sharpness.
     e.g.: img_q_fun = lambda img, m: _compute_laplacian_var(img, m)*0.5 + _compute_sobel_mean(img, m) + _compute_grad_mag(img, m)*100
     '''
 
     # Compute mask if not provided
-    mask1 = mask1.astype(bool) if mask1 is not None else compute_greyscale_mask(img1)
-    mask2 = mask2.astype(bool) if mask2 is not None else compute_greyscale_mask(img2)
+    if mask1 is None:
+        mask1 = compute_greyscale_mask(img1)
+    if mask2 is None:
+        mask2 = compute_greyscale_mask(img2)
+    mask1 = mask1.astype(bool)
+    mask2 = mask2.astype(bool)
 
-    # Estimate rigid offset
-    offset, rotation, _ = estimate_transform_sift(img1, img2, scale)   
-    
-    # Refine estimate for a better final result
-    o1, o2 = get_overlap(img1, img2, offset, rotation)   
-    offset2, _, _ = estimate_transform_sift(o1, o2, scale)
+    # Estimate and apply transformation to reference image
+    M, img1_shape, img2_offset, _= estimate_transform_sift(img2, img1, scale)   
+    img1 = cv2.warpAffine(img1, M, img1_shape[::-1])  
+    mask1 = cv2.warpAffine(mask1.astype(np.uint8), M, img1_shape[::-1]).astype(bool)
+
+    # Pad moving image so it matches the reference
+    img2 = np.pad(img2, xy_offset_to_pad(img2_offset))
+    mask2 = np.pad(mask2, xy_offset_to_pad(img2_offset))
+
+    # Make sure that images have the same shape for sofima
+    img1, img2 = homogenize_arrays_shape([img1, img2])
+    mask1, mask2 = homogenize_arrays_shape([mask1, mask2])
 
     if img_on_top == 'auto':
         # Determine automatically what image to put on top
-        m1, m2 = get_overlap(mask1, mask2, offset, rotation)
-        l1 = img_q_fun(o1, m1)
-        l2 = img_q_fun(o2, m2)
+        mask = mask1 & mask2
+        y1,y2,x1,x2 = mask_to_bbox(mask)
+        l1 = img_q_fun(img1[y1:y2, x1:x2], mask[y1:y2, x1:x2])
+        l2 = img_q_fun(img2[y1:y2, x1:x2], mask[y1:y2, x1:x2])
         if l1 > l2:
             post_on_top = False
         else:
@@ -159,28 +174,11 @@ def stitch_images(img1,
     elif img_on_top == '2':
         post_on_top = True
 
-    offset += offset2
-
-    # Rotate image
-    img2 = rotate_image(img2, rotation)
-    mask2 = rotate_image(mask2.astype(np.uint8), rotation).astype(bool)
-  
-    # Pad images and masks to apply the offset
-    img1 = np.pad(img1, xy_offset_to_pad(-offset))
-    img2 = np.pad(img2, xy_offset_to_pad(offset))
-    mask1 = np.pad(mask1, xy_offset_to_pad(-offset))
-    mask2 = np.pad(mask2, xy_offset_to_pad(offset))
-
-    # Make sure that images have the same shape for sofima
-    img1, img2 = homogenize_arrays_shape([img1, img2])
-    mask1, mask2 = homogenize_arrays_shape([mask1, mask2])
-
     # Mesh represents transformation from img2 to img1. We can crop img1 to avoid OOM errors
-    # There is surely a much better way to 
     pad = 200
 
     y1,y2,x1,x2 = mask_to_bbox(mask2)
-    y1,x1 = np.array([y1,x1]) - pad
+    y1,x1 = np.max([np.array([y1,x1]) - pad, [0,0]], axis=0)
     y2,x2 = np.min([[y2 + pad, x2 + pad], img2.shape], axis=0)
     
     x = get_elastic_mesh(img1[y1:y2, x1:x2], 
