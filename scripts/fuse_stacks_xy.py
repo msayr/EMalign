@@ -21,7 +21,7 @@ from emalign.arrays.utils import _compute_laplacian_var, _compute_sobel_mean, _c
 
 
 def get_fused_configs(
-        config_path,
+        main_config_path,
         scale=0.1
         ):
     '''Gather or compute configuration files for groups of stacks to fuse.
@@ -31,44 +31,35 @@ def get_fused_configs(
         scale (float, optional): Scale to downsample images for determining offset using SIFT. Defaults to 0.1.
 
     Returns:
-        fused_configs (dict of `dict`): Dict of index to configuration file per segment of stacks to fuse.
+        fused_configs (list of `dict`): list of configuration file per segment of stacks to fuse.
     '''
 
-    with open(config_path, 'r') as f:
-        main_config = json.load(f)
+    # Output directory for the config files
+    output_dir = os.path.dirname(os.path.abspath(main_config_path))
 
-    output_path = main_config['output_path']
-    project_name = main_config['project_name']
+    # Check for existing files
+    config_filepaths = glob(os.path.join(output_dir, 'fuse_xy*.json'))
 
-    dataset_paths = []
-    for d in glob(os.path.join(output_path, '*/')):
-        if os.path.basename(d) != project_name and '_mask' not in d:
-            # Discard final output volume and masks
-            if os.path.exists(os.path.join(d, '.zattrs')):
-                # Discard volumes that were not completed
-                dataset_paths.append(d)
+    if len(config_filepaths) == 0:
+        # Compute and write configuration files
+        overlapping_groups = create_configs_fused_stacks(main_config_path, scale=scale)
 
-    # Compute and write configuration files
-    overlapping_groups = find_overlapping_stacks(dataset_paths)
-    logging.info(f'Found {len(overlapping_groups)} segments of stacks.')
-
-    fused_configs = {}
-    pbar = tqdm(overlapping_groups, position=0)
-    for i, group in enumerate(pbar):
-        idx = '_'.join([group[0].kvstore.path.split('/')[-2].split('_')[0], str(i).zfill(2)])
-        filepath = os.path.join(os.path.dirname(config_path), f'fuse_xy_{idx}.json')
-
-        if not os.path.exists(filepath):
-            pbar.set_description(f'Group {idx}: Determining overlap...')
-            fused_config = create_configs_fused_stacks(group, scale)
-            with open(filepath, 'w') as f:
-                json.dump(fused_config, f, indent='')
-        else:
+        pbar = tqdm(overlapping_groups, position=0, desc='Looking for overlapping stacks')
+        for i, config in enumerate(pbar):
+            filepath = os.path.join(output_dir, f'fuse_xy_{config['zmin']}_{config['zmax']}_{i}.json')
+            if not os.path.exists(filepath):
+                with open(filepath, 'w') as f:
+                    json.dump(config, f, indent='')
+    else:
+        # Load configuration files
+        overlapping_groups = []
+        pbar = tqdm(config_filepaths, position=0, desc='Loading existing configurations')
+        for filepath in pbar:
             with open(filepath, 'r') as f:
-                fused_config = json.load(f)
-        fused_configs[idx] = fused_config
-        
-    return fused_configs
+                overlapping_groups.append(json.load(f))
+
+    logging.info(f'Found {len(overlapping_groups)} segments of stacks.')
+    return overlapping_groups
 
 
 def fuse_stacks_group(config, 
@@ -78,6 +69,8 @@ def fuse_stacks_group(config,
                       stride=40, 
                       img_on_top='auto', 
                       img_q_fun=None, 
+                      destination_path=None,
+                      target_res=None,
                       overwrite=False,
                       num_workers=1):
     '''Fuse a group of stacks that overlap on the XY plane.
@@ -102,59 +95,79 @@ def fuse_stacks_group(config,
         raise ValueError('img_on_top set to auto. Please provide img_q_fun.')
     
     # Open datasets
-    datasets = {}
-    dataset_masks = {}
-    destination_name = [list(config.keys())[0].split('_')[0]]
-    for stack, attrs in config.items():
-        datasets[stack] = ts.open({'driver': 'zarr',
+    datasets = []
+    for z_offset, ds_path in zip(config['z_offsets'], config['dataset_paths']):
+        # Open dataset
+        ds = ts.open({'driver': 'zarr',
                         'kvstore': {
                                 'driver': 'file',
-                                'path': attrs['path'],
+                                'path': ds_path,
                                     }},
                             read=True).result()
-        if os.path.exists(attrs['path'] + '_mask'):
-            dataset_masks[stack] = ts.open({'driver': 'zarr',
-                                    'kvstore': {
-                                        'driver': 'file',
-                                        'path': attrs['path'] + '_mask',
-                                                }},
-                                    read=True).result()
+        
+        # Limit to the overlapping range only
+        zmin = config['zmin'] - z_offset
+        zmax = config['zmax'] - z_offset
+        ds = ds[zmin:zmax]
+
+        # In case we need to resample
+        if target_res is not None:
+            s = get_dataset_attributes(ds)['resolution'][-1] / target_res
         else:
-            dataset_masks[stack] = None
-        destination_name.append(stack.split('_', maxsplit=1)[-1])
-    z_max = list(datasets.values())[0].domain[0].exclusive_max
-    destination_name = '_'.join(destination_name)
+            s = 1
+        
+        # Open mask if exists
+        ds_mask_path = os.path.abspath(ds_path) + '_mask'
+        if os.path.exists(ds_mask_path):
+            ds_mask = ts.open({'driver': 'zarr',
+                            'kvstore': {
+                            'driver': 'file',
+                            'path': ds_mask_path,
+                            }},
+                            read=True).result()
+            ds_mask = ds_mask[zmin:zmax]
+        else:
+            ds_mask = None
+        datasets.append({'dataset': ds, 'dataset_mask': ds_mask, 'target_scale': s, 'zmin': zmin})
 
     # Create destination
     if overwrite:
         logging.warning('Existing dataset will be deleted and aligned from scratch.')
 
-    # Prepare destination
-    destination_basepath = os.path.dirname(list(config.values())[0]['path'])
-    destination_path = os.path.join(destination_basepath, destination_name)
+    # Prepare destination    
+    destination_name = '_'.join([os.path.basename(os.path.abspath(ds)) for ds in config['dataset_paths']])
+    destination_name += '_fused'
+    z_shape = config['zmax'] - config['zmin']
+
+    if destination_path is None:
+        destination_basepath = os.path.dirname(os.path.abspath(config['dataset_paths'][0]))
+        destination_path = os.path.join(destination_basepath, destination_name)
     destination_mask_path = os.path.join(destination_basepath, destination_name + '_mask')
+
     if overwrite or not os.path.exists(destination_path):
+        # Create destination from scratch
         destination = ts.open({'driver': 'zarr',
                             'kvstore': {
                                 'driver': 'file',
                                 'path': destination_path,
                                         },
                             'metadata':{
-                                'shape': [z_max, 1, 1],
+                                'shape': [z_shape, 1, 1],
                                 'chunks':[1,512,512]
                                         },
                             'transform': {'input_labels': ['z', 'y', 'x']}
                             },
                             dtype=ts.uint8, 
                             create=True,
-                            delete_existing=True).result()   
+                            delete_existing=True).result() 
+          
         destination_mask = ts.open({'driver': 'zarr',
                             'kvstore': {
                                 'driver': 'file',
                                 'path': destination_mask_path,
                                         },
                             'metadata':{
-                                'shape': [z_max, 1, 1],
+                                'shape': [z_shape, 1, 1],
                                 'chunks':[1,512,512]
                                         },
                             'transform': {'input_labels': ['z', 'y', 'x']}
@@ -163,6 +176,7 @@ def fuse_stacks_group(config,
                             create=True,
                             delete_existing=True).result()   
     else:
+        # Load existing destination
         destination = ts.open({'driver': 'zarr',
                             'kvstore': {
                                 'driver': 'file',
@@ -170,18 +184,18 @@ def fuse_stacks_group(config,
                                         },
                             },
                             dtype=ts.uint8).result()  
+        
         destination_mask = ts.open({'driver': 'zarr',
                             'kvstore': {
                                 'driver': 'file',
                                 'path': destination_mask_path,
                                         },
                             },
-                            dtype=ts.bool).result()  
+                            dtype=ts.bool).result()        
     
     # Track progress
     db_host=None
-    stack_name = os.path.basename(destination_path).rstrip('.zarr')
-    collection_name='FUSE_XY_' + stack_name
+    collection_name ='FUSE_XY_' + destination_name
     client = MongoClient(db_host)
     db = client[db_name]
     collection_progress = db[collection_name]
@@ -191,33 +205,41 @@ def fuse_stacks_group(config,
     k = 0.1
     gamma = 0.5 
     
-    pbarz = tqdm(range(z_max), position=1)
+    pbarz = tqdm(range(z_shape), position=1)
     for z in pbarz:
-        if check_progress({'stack_name': stack_name, 'z': z}, db_host, db_name, collection_name) and not overwrite:
-            pbarz.set_description(f'Skipping...')
+        if check_progress({'stack_name': destination_name, 'z': z}, db_host, db_name, collection_name) and not overwrite:
+            pbarz.set_description(f'Skipping {z}...')
             continue
         pbarz.set_description(f'Fusing stacks...')
         canvas = None
         canvas_mask = None
-        pbar_slice = tqdm(config.keys(), position=2, leave=False)
-        for stack in pbar_slice:
-            pbar_slice.set_description('Slice in progress...')
-            img = datasets[stack][z].read().result()
+        pbar_stacks = tqdm(datasets, position=2, leave=False)
+        for stack in pbar_stacks:
+            pbar_stacks.set_description(f'Slice {z} in progress...')
+            dataset, dataset_mask, target_scale, zmin = stack.values()
 
+            # Load image
+            img = dataset[z + zmin].read().result()
             if not img.any():
                 continue
 
-            if dataset_masks[stack] is None:
+            # Load or compute mask
+            if dataset_mask is None:
                 mask = compute_greyscale_mask(img)
             else:
-                mask = dataset_masks[stack][z].read().result()
+                mask = dataset_mask[z + zmin].read().result()
 
+            # Resample to the correct resolution
+            img = downsample(img, target_scale)
+            mask = downsample(mask, target_scale)
+            
             if canvas is None:
                 # First image
                 canvas = img.copy()
                 canvas_mask = mask.copy()
                 continue
             
+            # Stitch images to canvas
             try:
                 canvas, canvas_mask = stitch_images(canvas, 
                                                     img,
@@ -240,14 +262,14 @@ def fuse_stacks_group(config,
                 print(f'Error in stack (z = {z}): {stack}')
                 raise(e)
             
-            if pbar_slice.n == pbar_slice.total-1:
-                pbar_slice.set_description('Writing slice...')
+            if pbar_stacks.n == pbar_stacks.total-1:
+                pbar_stacks.set_description('Writing slice...')
                 destination, _ = write_slice(destination, canvas, z)
                 destination_mask, _ = write_slice(destination_mask, canvas_mask, z)
 
         # Log progress
         doc = {
-            'stack_name': stack_name,
+            'stack_name': destination_name,
             'z': z,
             'mesh_parameters':{
                             'stride':stride,
@@ -263,10 +285,14 @@ def fuse_stacks_group(config,
         collection_progress.insert_one(doc)
 
     # Destination takes the same attributes as the stacks we just processed
-    attributes = get_dataset_attributes(list(datasets.values())[0])
+    attributes = get_dataset_attributes(datasets[0]['dataset'])
+    attributes['resolution'][1] = attributes['resolution'][2] = target_res
+    attributes['voxel_size'] = attributes['resolution']
+    attributes['voxel_offset'][0] = config['zmin']
+    attributes['offset'][0] = config['zmin'] * attributes['resolution'][0]
+    attributes['z_aligned'] = False # This should not exist but let's be safe
     set_dataset_attributes(destination, attributes)
     set_dataset_attributes(destination_mask, attributes)
-
     
 
 def align_fused_stacks_xy(config_path,
@@ -290,6 +316,7 @@ def align_fused_stacks_xy(config_path,
     
     with open(config_path, 'r') as f:
         main_config = json.load(f)
+    target_res = main_config['resolution'][-1]
 
     project = os.path.basename(main_config['output_path']).rstrip('.zarr')
     db_name=f'alignment_progress_{project}'
@@ -302,20 +329,20 @@ def align_fused_stacks_xy(config_path,
     # laplacian variance is sensitive to contrast and is thus weighted lower
     img_q_fun = lambda img, m: _compute_laplacian_var(img, m)*0.5 + _compute_sobel_mean(img, m) + _compute_grad_mag(img, m)*100
     
-    pbar = tqdm(fused_configs.items(), position=0, leave=True)
-    for segment, configs in pbar:
-        pbar.set_description(f'{segment}: Processing groups of stacks...')
-
-        for config in configs:
-            fuse_stacks_group(config, 
-                              db_name=db_name,
-                              scale=scale,
-                              patch_size=patch_size, 
-                              stride=stride, 
-                              img_on_top=img_on_top, 
-                              img_q_fun=img_q_fun, 
-                              overwrite=overwrite,
-                              num_workers=num_workers)
+    pbar = tqdm(fused_configs, position=0, leave=True)
+    for config in pbar:
+        pbar.set_description(f'z = {config['zmin']} - {config['zmax']}: Processing group of stacks...')
+        fuse_stacks_group(config, 
+                          db_name=db_name,
+                          scale=scale,
+                          patch_size=patch_size, 
+                          stride=stride, 
+                          target_res=target_res,
+                          img_on_top=img_on_top, 
+                          img_q_fun=img_q_fun, 
+                          overwrite=overwrite,
+                          num_workers=num_workers)
+    logging.info(f'All {len(fused_configs)} stacks were fused!')
 
 
 if __name__ == '__main__':

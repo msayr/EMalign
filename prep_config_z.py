@@ -55,7 +55,7 @@ def prep_config_z(config_paths,
         os.makedirs(config_dir, exist_ok=True)
         
         dataset_paths += [d for d in glob(os.path.join(output_path, '*/')) if os.path.basename(d[:-1]) != project_name]
-    datasets, z_offsets = get_ordered_datasets(dataset_paths)
+    datasets, z_offsets = get_ordered_datasets(dataset_paths, stack_configs_dir)
 
     existing_configs = glob(os.path.join(config_dir, 'z_*.json'))
     if len(existing_configs) > 0:
