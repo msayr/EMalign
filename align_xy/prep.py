@@ -17,6 +17,7 @@ from ..visualize.nglancer import add_layers, start_nglancer_viewer
 from ..align_z.utils import get_ordered_datasets
 
 
+
 def find_offset_from_main_config(main_config_path):
     '''Find z offset of a new stack based on the config of a preceding one.
 
@@ -99,7 +100,6 @@ def get_stacks(stack_paths,
             stack.tile_maps_invert = {k: invert_instructions[stack_names[0]] for k in tile_map[z].keys()}
 
             new_stacks[new_stack_name] = stack
-        
         else:
             combined_stack_name = '_'.join([str(group).zfill(2)] + stack_names)
             pair = []
