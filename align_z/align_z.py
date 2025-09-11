@@ -369,43 +369,51 @@ def _compute_flow(dataset,
 
 
 def compute_flow_dataset(dataset, 
-                         offset, 
                          scale, 
                          patch_size, 
-                         stride, 
+                         stride,
                          max_deviation,
                          max_magnitude,
-                         filter_size, 
-                         range_limit,
-                         first_slice=None,
-                         target_scale=None,
-                         rotation_angle=0,
-                         num_threads=0):
+                         db_name,
+                         original_shape=None,
+                         ignore_slices=[],
+                         destination_path=None,
+                         dataset_mask=None,
+                         ref_slice=None,
+                         ref_slice_mask=None,
+                         target_scale=1):
     
-    dataset_name = dataset.kvstore.path.split('/')[-2]
+    dataset_name = os.path.basename(os.path.abspath(dataset.kvstore.path))
+    flow, transform = _compute_flow(dataset=dataset, 
+                                    original_shape=original_shape,
+                                    ignore_slices=ignore_slices,
+                                    dataset_mask=dataset_mask, 
+                                    destination_path=destination_path,
+                                    patch_size=patch_size, 
+                                    stride=stride, 
+                                    scale=1*target_scale, 
+                                    ref_slice=ref_slice, 
+                                    ref_slice_mask=ref_slice_mask,
+                                    db_name=db_name)
+    assert not np.isnan(flow).all()
 
-    flow = _compute_flow(dataset=dataset, 
-                         offset=offset, 
-                         patch_size=patch_size, 
-                         stride=stride, 
-                         scale=1, 
-                         filter_size=filter_size, 
-                         range_limit=range_limit, 
-                         first_slice=first_slice, 
-                         target_scale=target_scale, 
-                         rotation_angle=rotation_angle, 
-                         num_threads=num_threads)
-    ds_flow = _compute_flow(dataset=dataset, 
-                            offset=(offset*scale).astype(int), 
-                            patch_size=patch_size, 
-                            stride=stride, 
-                            scale=scale, 
-                            filter_size=filter_size, 
-                            range_limit=range_limit, 
-                            first_slice=first_slice, 
-                            target_scale=target_scale, 
-                            rotation_angle=rotation_angle, 
-                            num_threads=num_threads)
+    ds_transform = transform*np.array([[1,1,scale,scale], [1,1,scale,scale]])
+    ds_ref_slice = downsample(ref_slice, scale) if ref_slice is not None else ref_slice
+    ds_ref_slice_mask = downsample(ref_slice_mask, scale) if ref_slice_mask is not None else ref_slice_mask
+    ds_flow, _ = _compute_flow(dataset=dataset, 
+                               original_shape=original_shape,
+                               ignore_slices=ignore_slices,
+                               dataset_mask=dataset_mask, 
+                               destination_path=destination_path,
+                               patch_size=patch_size, 
+                               stride=stride, 
+                               scale=scale*target_scale, 
+                               ref_slice=ds_ref_slice, 
+                               ref_slice_mask=ds_ref_slice_mask,
+                               transformations=ds_transform,
+                               save_transform=False,
+                               db_name=db_name)
+    assert not np.isnan(ds_flow).all()    
 
     pad = patch_size // 2 // stride
     flow = np.pad(flow, [[0, 0], [0, 0], [pad, pad], [pad, pad]], constant_values=np.nan)
@@ -421,7 +429,6 @@ def compute_flow_dataset(dataset,
                                     min_peak_sharpness=1.6, 
                                     max_magnitude=max_magnitude, 
                                     max_deviation=max_deviation)
-    
     ds_flow_hires = np.zeros_like(flow)
 
     bbox = bounding_box.BoundingBox(start=(0, 0, 0), 
@@ -438,8 +445,8 @@ def compute_flow_dataset(dataset,
             1 / scale, 1)
         ds_flow_hires[:, z:z + 1, ...] = resampled / scale
 
-    return flow_utils.reconcile_flows((flow, ds_flow_hires), 
-                                      max_gradient=0, max_deviation=max_deviation, min_patch_size=0)
+    final_flow = flow_utils.reconcile_flows((flow, ds_flow_hires), max_gradient=0, max_deviation=max_deviation, min_patch_size=400)
+    return final_flow, transform
 
 
 def get_inv_map(flow, stride, dataset_name, mesh_config=None):
