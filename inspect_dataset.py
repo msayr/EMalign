@@ -22,7 +22,6 @@ def read_data(
                                     }}
     dataset = ts.open(spec,
                       read=True,
-                      dtype=ts.uint8
                       ).result()
     
     if data_range is None:
