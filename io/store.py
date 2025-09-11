@@ -20,23 +20,32 @@ def write_slice(dataset, arr, z, x_offset=0, y_offset=0):
 
 
 # READ
-def get_data_slice(dataset, z, offset, target_scale, rotation_angle=0):
+def find_ref_slice(dataset, z=None, reverse=False):
 
+    '''Find first or last non-black slice of an image stack.
+
+    Args:
+        dataset (tensorstore.TensorStore): A dataset containing the image data.
+        z (int or None): Z index to start from (axis=0). If None, will pick a start based on reverse. Defaults to None.
+        reverse (bool): Whether to look for images at indices higher than z (False) or lower than z (True). Defaults to False.
+    
+    Returns:
+        tuple: tuple of image np.ndarray and corresponding z index.
     '''
-    Get image from a tensorstore dataset. Optionally resize, rotate, and pad to match a calculated offset and rotation.
-    '''
+    
+    increment = -1 if reverse else 1
 
-    data = dataset[z, ...].read().result()
-    data = cv2.equalizeHist(data)
+    if z is None and reverse:
+        z = dataset.domain.exclusive_max[0] - 1 
+    elif z is None:
+        z = dataset.domain.inclusive_min[0]
 
-    if target_scale < 1:
-        data = cv2.resize(data, None, fx=target_scale, fy=target_scale)
+    img = dataset[z].read().result()
 
-    if rotation_angle != 0:
-        data = rotate_image(data, rotation_angle)
-
-    data = np.pad(data, np.stack([offset[1:], [0,0]]).T)
-    return data
+    while not img.any():
+        z += increment
+        img = dataset[z].read().result()
+    return img, z
 
 
 def get_data_samples(dataset, step_slices, yx_target_resolution):
