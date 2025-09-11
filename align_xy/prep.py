@@ -169,94 +169,58 @@ def check_stacks_to_invert(stack_list,
 
 
 # FUSE STACKS
-def find_overlapping_stacks(dataset_paths):
-    '''Find potentially overlapping stacks from a list of store paths. 
-
-    Stacks are determined to be potentially overlapping if their z offsets match.
+def create_configs_fused_stacks(main_config_path,
+                                scale = 0.1
+                                ):
     
-    Args:
-        dataset_paths (`list` of `str`): List of absolute paths to zarr stores containing the image data.
+    # Target resolution
+    with open(main_config_path, 'r') as f:
+        target_res = json.load(f)['resolution'][-1]
 
-    Returns:
-        overlapping_stacks (`list` of `list`): List of lists containing groups of overlapping stacks.
-    '''
+    # Find datasets
+    datasets, z_offsets = get_ordered_datasets([main_config_path], exclude=['flow', 'mask', '10x'])
+    z_ranges = [np.arange(z[0], z[0] + ds.shape[0]) for z, ds in zip(z_offsets, datasets)]
 
-    datasets, z_offsets = get_ordered_datasets(dataset_paths)
-    datasets = datasets[::-1]
-    z_offsets = z_offsets[::-1]
+    # Find all ranges over which there is overlap
+    unique_slices = sorted(np.unique(np.concatenate(z_ranges)).tolist())
+    df = pd.DataFrame({'z': unique_slices, 
+                    'ds_indices': [[] for _ in range(len(unique_slices))]
+                        })
+    extend_list = lambda lst: lst + [datasets.index(ds)]
+    for ds, z_range in zip(datasets, z_ranges):
+        df.loc[df.z.isin(z_range), 'ds_indices'] = df.loc[df.z.isin(z_range), 'ds_indices'].apply(extend_list)
+    df['group'] = df['ds_indices'].ne(df['ds_indices'].shift()).cumsum()
 
-    overlapping_stacks = []
-    while datasets:
-        d = datasets.pop()
-        z, z_offsets = z_offsets[-1], z_offsets[:-1]
-        idx = np.where(z[0] == z_offsets[:,0])[0]
-        z_offsets = np.delete(z_offsets, idx, axis=0)
-        
-        group = [d]
-        if idx.size > 0:
-            for i in idx[::-1]:
-                group.append(datasets[i])
-                del datasets[i]
+    # Test overlap and create fused config in consequence
+    fused_configs = []
+    for _, group in df.groupby('group'):
+        z = group.z.min()
+        indices = np.unique(group.ds_indices.to_numpy())[0]
 
-        overlapping_stacks.append(group)
+        images = []
+        for i in indices:
+            ds = datasets[i]
 
-    return overlapping_stacks
+            # Downsample if necessary
+            yx_res = get_dataset_attributes(ds)['resolution'][-1]
+            target_scale = yx_res/target_res
+            img, _ = find_ref_slice(ds, z - z_offsets[i][0]) # Could be better by accounting for gaps
+            images.append(downsample(img, target_scale))
 
+        # Test images and store valid matches
+        G = nx.Graph()
+        for i, j in combinations(range(len(images)), 2):
+            valid_estimate = estimate_transform_sift(images[i], images[j], scale, refine_estimate=True)[3]
+            if valid_estimate:
+                G.add_edge(indices[i], indices[j])
 
-def create_configs_fused_stacks(overlapping_stacks, 
-                                scale=0.2):
-    
-    '''Create configurations for overlapping stacks.
-
-    For stacks existing on the same Z levels, that were stitched "on grid" or images that could not, determine whether they do overlap and their transformations.
-
-    Args:
-        overlapping_stacks (list): List of stacks with the same Z offset, potentially overlapping on the XY plane.
-        scale (`float`, optional): Scale to use to downsample images when determining offset with SIFT. Defaults to 0.2. 
-
-    Returns:
-        fuse_configs (`list` of `dict`): List of dictionaries of configuration of the stacks.\n
-            Keys: Names of the stack found to be overlapping.\n
-            path: Absolute path to the store containing the image data of this stack\n
-            z_offset: Offset in pixel along the z axis.\n
-            xy_offset: Offset (xy) in pixel to apply to the stack for images to be roughly aligned.\n
-            rotation: Rotation (degrees) to be applied to the stack for images to be roughly aligned. 
-    '''
-
-    first_slices = {}
-    overlap_G = nx.Graph()
-
-    for dataset in overlapping_stacks:
-        z = 0
-        path = os.path.abspath(dataset.kvstore.path)
-        stack_name = os.path.basename(path)
-        img = dataset[z].read().result()
-        while not img.any():
-            # If latest slice before this dataset is empty, go to the previous one until finding a non-empty slice
-            z += 1
-            img = dataset[z].read().result()
-
-        first_slices[stack_name] = (z, img)
-        overlap_G.add_node(stack_name, path=path, z=z)
-
-    for stack1, stack2 in tqdm(list(combinations(first_slices.keys(), 2))):
-        img1 = first_slices[stack1][1]
-        img2 = first_slices[stack2][1]
-        _, _, _, valid_estimate = estimate_transform_sift(img1, img2, scale, refine_estimate=True)
-
-        if valid_estimate:
-            overlap_G.add_edge(stack1, stack2)
-
-    # Group by group, depth first search to make sure we connect all images properly
-    fuse_configs = []
-    for group in nx.connected_components(overlap_G):
-        if len(group) == 1:
-            continue
-        
-        G = overlap_G.subgraph(group)
-        fuse_configs.append({n: {
-                                'path': G.nodes[n]['path'],
-                                'z_offset': int(G.nodes[n]['z'])
-                                } 
-                                for n in nx.dfs_tree(G)})
-    return fuse_configs
+        # Valid matches are chained in case there are more than 2 matches for a range
+        for cc in nx.connected_components(G):
+            config = {
+                'dataset_paths': [datasets[i].kvstore.path for i in cc], 
+                'z_offsets': [int(z_offsets[i,0]) for i in cc],
+                'zmin': int(z), 
+                'zmax': int(group.z.max()) + 1 # Exclusive max
+                } 
+            fused_configs.append(config)
+    return fused_configs
