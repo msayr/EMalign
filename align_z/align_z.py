@@ -452,7 +452,7 @@ def compute_flow_dataset(dataset,
 def get_inv_map(flow, stride, dataset_name, mesh_config=None):
 
     if mesh_config is None:
-        mesh_config = mesh.IntegrationConfig(dt=0.001, gamma=0.0, k0=0.01, k=0.1, stride=(stride, stride), num_iters=1000,
+        mesh_config = mesh.IntegrationConfig(dt=0.001, gamma=0.5, k0=0.01, k=0.1, stride=(stride, stride), num_iters=1000,
                                             max_iters=100000, stop_v_max=0.005, dt_max=1000, start_cap=0.01,
                                             final_cap=10, prefer_orig_order=True)
 
