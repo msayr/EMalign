@@ -25,28 +25,30 @@ def prep_config_z(config_paths,
     
     with open(config_z_path, 'r') as f:
         config_z = json.load(f)
+    
+    stride          = config_z['stride']
+    patch_size      = config_z['patch_size']    
+    max_deviation   = config_z['max_deviation']
+    max_magnitude   = config_z['max_magnitude']  
+    scale_offset    = config_z['scale_offset']        
+    scale_flow      = config_z['scale_flow']    
+    step_slices     = config_z['step_slices']
+    filter_size     = config_z['mask_filter_size']    
+    range_limit     = config_z['mask_range_limit']
+    yx_target_resolution = config_z['yx_target_resolution']
+    k0      = config_z['k0'] 
+    k       = config_z['k'] 
+    gamma   = config_z['gamma']
 
     dataset_paths = []
+    stack_configs_dir = []
     for config_path in config_paths:
         with open(config_path, 'r') as f:
             main_config = json.load(f)
 
         project_name    = main_config['project_name']
         output_path     = main_config['output_path']
-
-        stride          = config_z['stride']
-        patch_size      = config_z['patch_size']    
-        max_deviation   = config_z['max_deviation']
-        max_magnitude   = config_z['max_magnitude']  
-        scale_offset    = config_z['scale_offset']        
-        scale_flow      = config_z['scale_flow']    
-        step_slices     = config_z['step_slices']
-        filter_size     = config_z['mask_filter_size']    
-        range_limit     = config_z['mask_range_limit']
-        yx_target_resolution = config_z['yx_target_resolution']
-        k0      = config_z['k0'] 
-        k       = config_z['k'] 
-        gamma   = config_z['gamma']
+        stack_configs_dir.append(os.path.dirname(list(main_config['stack_configs'].values())[0]))
 
         destination_path = os.path.join(output_path, project_name)
         config_dir = os.path.join(os.path.dirname(output_path), 'config')
