@@ -1,21 +1,47 @@
+from time import sleep
+import cv2
+from emalign.io.mongo import check_progress
+import logging
 import jax
 import jax.numpy as jnp
 import numpy as np
 import os
+from pymongo import MongoClient
 import tensorstore as ts
 
-from concurrent import futures
 from connectomics.common import bounding_box
-from cv2 import resize
-from sofima import flow_field, flow_utils, map_utils, mesh, warp
+from sofima import flow_field, flow_utils, map_utils, mesh
+from sofima.mesh import velocity_verlet, inplane_force, IntegrationConfig
 from tqdm import tqdm
 
-from ..io.store import get_data_slice
-from ..arrays.utils import pad_to_shape
+from emprocess.utils.mask import compute_greyscale_mask
+from emprocess.utils.io import get_dataset_attributes, set_dataset_attributes
+from ..io.store import find_ref_slice
+from ..arrays.utils import downsample, homogenize_arrays_shape, pad_to_shape
+from ..arrays.sift import estimate_transform_sift
 
 
-# TODO: remove need for computing masks if they exist.
-# change _compute_flow to use masks better
+def write_flow(dataset, arr, z):
+    y,x = arr.shape[-2:]
+    new_max = np.array([z+1, 4, y, x])
+    if np.any(np.array(dataset.domain.exclusive_max) < new_max):
+        new_max = np.max([dataset.domain.exclusive_max, new_max], axis=0)
+        dataset = dataset.resize(exclusive_max=new_max, expand_only=True).result()
+    try:
+        return dataset, dataset[z, :, :y, :x].write(arr).result()
+    except Exception as e:
+        raise e
+
+
+def write_trsf(dataset, arr, z):
+    new_max = np.array([z+1, 2, 4])
+    if np.any(np.array(dataset.domain.exclusive_max) < new_max):
+        new_max = np.max([dataset.domain.exclusive_max, new_max], axis=0)
+        dataset = dataset.resize(exclusive_max=new_max, expand_only=True).result()
+    try:
+        return dataset, dataset[z, :, :].write(arr).result()
+    except Exception as e:
+        raise e
 
 
 def _compute_flow(dataset, 
