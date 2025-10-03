@@ -1,12 +1,11 @@
 from time import sleep
 import cv2
-from emalign.io.mongo import check_progress
+from emalign.io.progress import check_progress, log_progress
 import logging
 import jax
 import jax.numpy as jnp
 import numpy as np
 import os
-from pymongo import MongoClient
 import tensorstore as ts
 
 from connectomics.common import bounding_box
@@ -44,11 +43,11 @@ def write_trsf(dataset, arr, z):
         raise e
 
 
-def _compute_flow(dataset, 
-                  patch_size, 
-                  stride, 
-                  scale, 
-                  db_name,
+def _compute_flow(dataset,
+                  patch_size,
+                  stride,
+                  scale,
+                  db,
                   original_shape=None,
                   ignore_slices=[],
                   destination_path=None,
@@ -157,16 +156,11 @@ def _compute_flow(dataset,
                     }
             set_dataset_attributes(dataset_trsf, attrs)
     
-    #---------- Prepare MongoDB ----------#
-    # Track progress
-    db_host=None
-    collection_name=f'FLOW_{scale_str}x_' + dataset_name
-    client = MongoClient(db_host)
-    db = client[db_name]
-    collection_progress = db[collection_name]
-
+    #---------- Check Progress ----------#
+    step_name = f'flow_z_{scale_str}x'
+    collection = db[dataset_name]
     n_docs = dataset.shape[0] - int(ref_slice is None)
-    if collection_progress.count_documents({'stack_name': dataset_name, 'scale': scale}) == n_docs:
+    if collection.count_documents({'step_name': step_name}) >= n_docs:
         flows = np.transpose(dataset_flow.read().result(), [1, 0, 2, 3])
         if transformations is None:
             transform = dataset_trsf.read().result()
@@ -205,7 +199,7 @@ def _compute_flow(dataset,
     pbar = tqdm(range(start, dataset.domain.exclusive_max[0]), position=0)
     for z in pbar:
         ##### CHECKPOINT #####
-        if check_progress({'stack_name': dataset_name, 'z': z, 'scale': scale}, db_host, db_name, collection_name):
+        if check_progress(db, dataset_name, step_name, z):
             # If slice was processed, we read the flow and transform, or get transform from input
             pbar.set_description(f'{dataset_name}: Skipping...')
             pickup_progress = True # Get ref for first valid slice
@@ -254,14 +248,13 @@ def _compute_flow(dataset,
                     dataset_trsf, _ = write_trsf(dataset_trsf, t, z)
 
             # Log progress
-            doc = {
-                'stack_name': dataset_name,
-                'z': z,
+            metadata = {
                 'z_prev': z_prev,
                 'skipped': True,
                 'scale': scale
-                    }
-            collection_progress.insert_one(doc)
+            }
+            local_slice_index = z - dataset.domain.inclusive_min[0]
+            log_progress(db, dataset_name, step_name, z, local_slice_index, metadata)
             continue
 
         ##### MAIN LOOP #####
@@ -271,14 +264,13 @@ def _compute_flow(dataset,
         # If empty slice, skip and compare to next one
         if not curr.any():
             # Log progress
-            doc = {
-                'stack_name': dataset_name,
-                'z': z,
+            metadata = {
                 'z_prev': z_prev,
                 'skipped': True,
                 'scale': scale
-                    }
-            collection_progress.insert_one(doc)
+            }
+            local_slice_index = z - dataset.domain.inclusive_min[0]
+            log_progress(db, dataset_name, step_name, z, local_slice_index, metadata)
             continue
         
         curr = downsample(curr, scale)
@@ -340,9 +332,7 @@ def _compute_flow(dataset,
                 dataset_trsf, _ = write_trsf(dataset_trsf, t, z)
 
             # Log progress
-            doc = {
-                'stack_name': dataset_name,
-                'z': z,
+            metadata = {
                 'z_prev': z_prev,
                 'flow_parameters':{
                                 'stride':stride,
@@ -352,8 +342,9 @@ def _compute_flow(dataset,
                 'valid_estimate': valid_estimate,
                 'scale': scale,
                 'skipped': False
-                    }
-            collection_progress.insert_one(doc)
+            }
+            local_slice_index = z - dataset.domain.inclusive_min[0]
+            log_progress(db, dataset_name, step_name, z, local_slice_index, metadata)
             
             prev = curr.copy()
             prev_mask = curr_mask.copy()
@@ -368,13 +359,13 @@ def _compute_flow(dataset,
     return flows, transform
 
 
-def compute_flow_dataset(dataset, 
-                         scale, 
-                         patch_size, 
+def compute_flow_dataset(dataset,
+                         scale,
+                         patch_size,
                          stride,
                          max_deviation,
                          max_magnitude,
-                         db_name,
+                         db,
                          original_shape=None,
                          ignore_slices=[],
                          destination_path=None,
@@ -384,7 +375,7 @@ def compute_flow_dataset(dataset,
                          target_scale=1):
     
     dataset_name = os.path.basename(os.path.abspath(dataset.kvstore.path))
-    flow, transform = _compute_flow(dataset=dataset, 
+    flow, transform = _compute_flow(dataset=dataset,
                                     original_shape=original_shape,
                                     ignore_slices=ignore_slices,
                                     dataset_mask=dataset_mask, 
@@ -394,13 +385,13 @@ def compute_flow_dataset(dataset,
                                     scale=1*target_scale, 
                                     ref_slice=ref_slice, 
                                     ref_slice_mask=ref_slice_mask,
-                                    db_name=db_name)
+                                    db=db)
     assert not np.isnan(flow).all()
 
     ds_transform = transform*np.array([[1,1,scale,scale], [1,1,scale,scale]])
     ds_ref_slice = downsample(ref_slice, scale) if ref_slice is not None else ref_slice
     ds_ref_slice_mask = downsample(ref_slice_mask, scale) if ref_slice_mask is not None else ref_slice_mask
-    ds_flow, _ = _compute_flow(dataset=dataset, 
+    ds_flow, _ = _compute_flow(dataset=dataset,
                                original_shape=original_shape,
                                ignore_slices=ignore_slices,
                                dataset_mask=dataset_mask, 
@@ -412,7 +403,7 @@ def compute_flow_dataset(dataset,
                                ref_slice_mask=ds_ref_slice_mask,
                                transformations=ds_transform,
                                save_transform=False,
-                               db_name=db_name)
+                               db=db)
     assert not np.isnan(ds_flow).all()    
 
     pad = patch_size // 2 // stride

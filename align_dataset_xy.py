@@ -29,7 +29,9 @@ logging.getLogger('jax._src.xla_bridge').setLevel(logging.WARNING)
 
 
 def align_dataset_xy(config_path,
-                     num_workers):
+                     num_workers,
+                     overwrite=False,
+                     wipe_progress_stack=None):
     '''Align and stitch in XY consecutive image stacks defined by a configuration file.
 
     Image stacks will be aligned one by one based on paths and parameters defined in a configuration file.
@@ -39,16 +41,22 @@ def align_dataset_xy(config_path,
         config_path (str): Absolute path to a JSON file containing the configuration.
             See documentation for how to format the configuration file (work in progress).
         num_workers (int): Number of threads to use for multiprocessing when relevant.
+        overwrite (bool): Whether to overwrite dataset. If True, will delete existing dataset and start over. If False, will check for progress and skip processed slices. Defaults to False.
+        wipe_progress_stack (str, optional): Name of the stack to wipe progress for. Defaults to None.
     '''
     
     with open(config_path, 'r') as f:
         main_config = json.load(f)
 
+    project_name = main_config.get('project_name')
+    if not project_name:
+        project_name = os.path.basename(main_config['output_path']).rstrip('.zarr')
+    mongodb_config_filepath = main_config.get('mongodb_config_filepath')
+
     main_dir        = main_config['main_dir']
     output_path     = main_config['output_path']
     resolution      = main_config['resolution']
     offset          = main_config['offset']
-    scale           = main_config['scale']
     stride          = main_config['stride']
     apply_gaussian  = main_config['apply_gaussian']
     apply_clahe     = main_config['apply_clahe']
@@ -61,10 +69,9 @@ def align_dataset_xy(config_path,
     logging.info(f'Tilesets found in:\n   {main_dir}')
     logging.info(f'Destination:\n   {output_path}')
     logging.info(f' - Resolution: {resolution}')
-    logging.info(f' - Compute scale: {scale}')
     logging.info(f' - Apply gaussian: {apply_gaussian}')
     logging.info(f' - Apply CLAHE: {apply_clahe}\n')
-    logging.info(f'Aligning {len(stack_configs)} tilesets, including {main_config['tilesets_combined']} combined.')
+    logging.info(f'Aligning {len(stack_configs)} tilesets, including {main_config.get("tilesets_combined", 0)} combined.')
     for s in stack_configs.keys():
         logging.info(f'    {s}')
 
@@ -74,6 +81,7 @@ def align_dataset_xy(config_path,
                                                 desc='Processing stacks', 
                                                 leave=True):
         tile_maps_paths, tile_maps_invert = parse_stack_info(stack_config_path)
+        wipe_this_stack = (stack_name == wipe_progress_stack)
         align_stack_xy(output_path=output_path,
                        stack_name=stack_name,
                        tile_maps_paths=tile_maps_paths,
@@ -83,8 +91,11 @@ def align_dataset_xy(config_path,
                        stride=stride,
                        apply_gaussian=apply_gaussian,
                        apply_clahe=apply_clahe,
+                       project_name=project_name,
+                       mongodb_config_filepath=mongodb_config_filepath,
                        num_cores=num_workers,
-                       overwrite=False)
+                       overwrite=overwrite,
+                       wipe_progress_flag=wipe_this_stack)
     logging.info(f'Done! Output can be found at: {output_path}')
     
 
@@ -105,6 +116,12 @@ if __name__ == '__main__':
                         type=int,
                         default=1,
                         help='Number of threads to use for processing. Default: 1')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing dataset.')
+    parser.add_argument('--wipe-progress',
+                        dest='wipe_progress_stack',
+                        type=str,
+                        default=None,
+                        help='Wipe progress for a specific stack before starting.')
     args=parser.parse_args()
 
 
@@ -115,4 +132,4 @@ if __name__ == '__main__':
         sys.exit()
     print(f'Available GPU IDs: {GPU_ids}\n')
 
-    align_dataset_xy(**vars(args))    
+    align_dataset_xy(**vars(args))

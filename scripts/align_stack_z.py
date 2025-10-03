@@ -1,4 +1,4 @@
-import inspect
+import argparse
 import os
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 # os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'cuda_async'
@@ -6,12 +6,10 @@ os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'platform'
 # os.environ['OMP_NUM_THREADS'] = '4'
 # os.environ['MKL_NUM_THREADS'] = '4'
 
-import datetime
 import cv2
 import json
 import numpy as np
 import logging
-import sys
 import tensorstore as ts
 
 from connectomics.common import bounding_box
@@ -25,7 +23,7 @@ from emprocess.utils.mask import compute_greyscale_mask, mask_to_bbox
 from emalign.align_z.align_z import compute_flow_dataset, get_inv_map_mod
 from emalign.io.store import find_ref_slice
 from emalign.arrays.utils import downsample
-
+from emalign.io.progress import get_mongo_client, get_mongo_db, wipe_progress, check_progress, log_progress
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger('absl').setLevel(logging.WARNING)
@@ -34,7 +32,8 @@ logging.getLogger('jax._src.xla_bridge').setLevel(logging.WARNING)
 # TODO: save PR metric for optic flow to highlight slices where alignment might not be good
 
 def align_stack_z(destination_path,
-                  dataset_path, 
+                  dataset_path,
+                  dataset_name,
                   z_offset,
                   scale, 
                   flow_config,
@@ -42,19 +41,28 @@ def align_stack_z(destination_path,
                   warp_config,
                   first_slice,
                   yx_target_resolution,
-                  db_name,
+                  project_name,
+                  mongodb_config_filepath=None,
                   local_z_min=None,
                   local_z_max=None,
                   xy_offset=[0,0],
                   ignore_slices_flow=[],
                   save_downsampled=1,
                   overwrite=False,
+                  wipe_progress_flag=False,
                   num_workers=10):
     
     if isinstance(yx_target_resolution, list):
         assert yx_target_resolution[0] == yx_target_resolution[1], 'Only supports equal resolution in X and Y'
         yx_target_resolution = yx_target_resolution[0]
     
+    client = get_mongo_client(mongodb_config_filepath)
+    db = get_mongo_db(client, project_name)
+
+    if wipe_progress_flag:
+        logging.info(f"Wiping progress for stack: {dataset_name}")
+        wipe_progress(db, dataset_name)
+
     #---------- Prepare variables ----------#
     # Flow parameters
     patch_size    = flow_config['patch_size'] 
@@ -72,7 +80,6 @@ def align_stack_z(destination_path,
     overlap   = warp_config['overlap'] 
     
     # Paths
-    dataset_name = os.path.basename(os.path.abspath(dataset_path))
     destination_path = os.path.abspath(destination_path)
     dataset_path = os.path.abspath(dataset_path)
     
@@ -143,9 +150,10 @@ def align_stack_z(destination_path,
                                 dtype=ts.bool
                                 ).result()
     
+    ds_destination = None
     if save_downsampled > 1:
-        ds_output_path, project_name = destination_path.rsplit('/', maxsplit=1)
-        ds_output_path = os.path.join(ds_output_path, f'{save_downsampled}x_' + project_name)
+        ds_output_path, project_name_from_path = destination_path.rsplit('/', maxsplit=1)
+        ds_output_path = os.path.join(ds_output_path, f'{save_downsampled}x_' + project_name_from_path)
         ds_destination = ts.open({'driver': 'zarr',
                                   'kvstore': {
                                           'driver': 'file',
@@ -191,7 +199,7 @@ def align_stack_z(destination_path,
                                            stride=stride, 
                                            max_deviation=max_deviation,
                                            max_magnitude=max_magnitude,
-                                           db_name=db_name,
+                                           db=db,
                                            destination_path=os.path.dirname(os.path.abspath(destination_path)),
                                            ref_slice=first_slice,
                                            ref_slice_mask=first_slice_mask,
@@ -236,10 +244,10 @@ def align_stack_z(destination_path,
 
         write_data(destination, first, 
                    z + z_offset - dataset.domain.inclusive_min[0], # z_offset relates to the original minimum
-                   np.abs(xy_offset), save_downsampled, ds_destination)
+                   None, np.abs(xy_offset), save_downsampled, ds_destination)
         write_data(destination_mask, first_mask, 
                    z + z_offset - dataset.domain.inclusive_min[0], 
-                   np.abs(xy_offset))
+                   None, np.abs(xy_offset))
         
         start = z + 1
     else:
@@ -249,15 +257,24 @@ def align_stack_z(destination_path,
     # Start alignment
     output_shape = np.max(transform[:,:,-1], axis=0).astype(int)
     skipped = 0
-    for z in tqdm(range(start, dataset.shape[0]), 
+    step_name = "render_z"
+    for z in tqdm(range(start, dataset.domain.exclusive_max[0]),
                     position=0,
                     desc=f'{dataset_name}: Rendering aligned slices'):
+
+        if check_progress(db, dataset_name, step_name, z) and not overwrite:
+            skipped += 1 # Assume skipped slices are logged correctly
+            continue
+
         # Load data
         data = dataset[z].read().result()
 
         if not data.any():
             # If empty slice, skip and go to next z
             skipped += 1
+            metadata = {'skipped': True, 'empty_slice': True}
+            local_slice_index = z - dataset.domain.inclusive_min[0]
+            log_progress(db, dataset_name, step_name, z, local_slice_index, metadata)
             continue
 
         # Resample if needed (target_scale != 1)
@@ -320,6 +337,15 @@ def align_stack_z(destination_path,
                    aligned_mask[y1:y2, x1:x2],
                    np.abs(xy_offset) + np.array([x1, y1]), 
                    1, None)
+
+        metadata = {
+            'skipped': False,
+            'warp_config': warp_config,
+            'mesh_config': mesh_config,
+            'bbox': [int(y1), int(y2), int(x1), int(x2)]
+        }
+        local_slice_index = z - dataset.domain.inclusive_min[0]
+        log_progress(db, dataset_name, step_name, z, local_slice_index, metadata)
     logging.info(f'{dataset_name}: Done. ({skipped} empty slices)')
 
     # Add an attribute to keep track of what datasets have been aligned already
@@ -351,7 +377,7 @@ def write_data(destination, data, z, mask=None, xy_offset=[0,0], save_downsample
     if save_downsampled > 1 and ds_destination is not None:
         ds_data = cv2.resize(data, None, fx=1/save_downsampled, fy=1/save_downsampled)
         y,x = ds_data.shape
-        x_off, y_off = xy_offset // save_downsampled
+        x_off, y_off = (np.array(xy_offset) / save_downsampled).astype(int)
         if np.any(ds_destination.domain.exclusive_max < np.array([z+1, y+y_off, x+x_off])):
             new_max = np.max([ds_destination.domain.exclusive_max, [z+1, y+y_off, x+x_off]], axis=0)
             ds_destination = ds_destination.resize(exclusive_max=new_max, expand_only=True).result()
@@ -362,11 +388,23 @@ def write_data(destination, data, z, mask=None, xy_offset=[0,0], save_downsample
 
 if __name__ == '__main__':
 
-    config_file = sys.argv[1]
-    with open(config_file, 'r') as f:
+    parser = argparse.ArgumentParser(description='Align a stack in Z.')
+    parser.add_argument('config_file', type=str, help='Path to the JSON configuration file.')
+    parser.add_argument('--wipe-progress', action='store_true', help='Wipe progress for the specified stack before starting.')
+
+    args = parser.parse_args()
+
+    with open(args.config_file, 'r') as f:
         config = json.load(f)
 
-    params = inspect.signature(align_stack_z).parameters
-    relevant_args = {k: v for k, v in config.items() if k in params}
+    project_name = config.get('project_name')
+    if not project_name:
+        project_name = os.path.basename(config['destination_path']).rstrip('.zarr')
 
-    align_stack_z(**relevant_args)
+    mongodb_config_filepath = config.get('mongodb_config_filepath')
+
+    config['project_name'] = project_name
+    config['mongodb_config_filepath'] = mongodb_config_filepath
+    config['wipe_progress_flag'] = args.wipe_progress
+
+    align_stack_z(**config)

@@ -35,7 +35,8 @@ def align_dataset_z(config_paths,
                     num_workers, 
                     save_downsampled,
                     no_align,
-                    start_over):
+                    start_over,
+                    wipe_progress_stack=None):
     
     #---------- Open/prepare configs ----------#
     # Read common Z alignments parameters
@@ -48,13 +49,16 @@ def align_dataset_z(config_paths,
         output_configs_dir = config_paths[0]
         config_paths = glob(os.path.join(output_configs_dir, 'z*.json'))
 
+        with open(config_paths[0], 'r') as f:
+            first_config = json.load(f)
+            project_name = first_config.get('project_name')
+            if not project_name:
+                project_name = os.path.basename(first_config['destination_path']).rstrip('.zarr')
+            mongodb_config_filepath = first_config.get('mongodb_config_filepath')
+
         if destination_path is None:
-            with open(config_paths[0], 'r') as f:
-                destination_path = os.path.abspath(json.load(f)['destination_path'])
-                project_name = destination_path.split('/')[-1]
+            destination_path = os.path.abspath(first_config['destination_path'])
         else:
-            with open(config_paths[0], 'r') as f:
-                project_name = os.path.abspath(json.load(f)['destination_path']).split('/')[-1]
             destination_path = os.path.join(os.path.abspath(destination_path), project_name)
 
         # Get list of datasets and offsets
@@ -71,7 +75,7 @@ def align_dataset_z(config_paths,
                     }
                 }
             datasets.append(ts.open(spec).result())
-            z_offsets.append([config['z_offset']] + config['xy_offset'])
+            z_offsets.append([config['z_offset']] + config.get('xy_offset', [0,0]))
         z_offsets = np.array(z_offsets)
         datasets = [datasets[i] for i in np.argsort(z_offsets[:, 0])]
         z_offsets = z_offsets[np.argsort(z_offsets[:, 0])]
@@ -80,7 +84,7 @@ def align_dataset_z(config_paths,
         for config_path in config_paths:
             with open(config_path, 'r') as f:
                 c = json.load(f)
-                r = c['resolution'][0] if 'resolution' in c else c['yx_target_resolution'][0]
+                r = c['resolution'][0] if 'resolution' in c else c.get('yx_target_resolution', [float('inf')])[0]
                 yx_target_resolution = min(yx_target_resolution, r)
 
         create_configs = False
@@ -88,7 +92,10 @@ def align_dataset_z(config_paths,
         # Load dataset paths from main config files
         with open(config_paths[0], 'r') as f:
             config = json.load(f)
-        project_name = config['project_name']
+        project_name = config.get('project_name')
+        if not project_name:
+            project_name = os.path.basename(config['output_path']).rstrip('.zarr')
+        mongodb_config_filepath = config.get('mongodb_config_filepath')
 
         if destination_path is None:
             destination_path = config['output_path']
@@ -101,17 +108,17 @@ def align_dataset_z(config_paths,
 
         # Get list of datasets and offsets
         datasets, z_offsets = get_ordered_datasets(config_paths, exclude=['/flow', '_mask'] + exclude)
-    
-    project_container = os.path.basename(os.path.dirname(os.path.abspath(destination_path))).rstrip('.zarr')
-    db_name=f'alignment_progress_{project_container}'
 
     #---------- Compute alignment path and initial offset ----------#
     # Print some info
     logging.info('Datasets Z offsets:')
     for dataset, z in zip(datasets, z_offsets):
         yx_res = get_dataset_attributes(dataset)['resolution'][1:]
-        logging.info(f'    {z[0]} (res: {yx_res}): {dataset.kvstore.path.split('/')[-2]}')
-    yx_target_resolution = np.min(yx_target_resolution, axis=0).tolist()
+        logging.info(f'    {z[0]} (res: {yx_res}): {dataset.kvstore.path.split("/")[-1]}')
+
+    if isinstance(yx_target_resolution, list):
+        yx_target_resolution = np.min(yx_target_resolution, axis=0).tolist()
+
     logging.info(f'Target resolution (yx): {yx_target_resolution}\n')
     
     if create_configs or start_over:
@@ -175,7 +182,8 @@ def align_dataset_z(config_paths,
                     'dataset_name': dataset_name,
                     'alignment_path': path,
                     'reverse_order': order,
-                    'db_name': db_name,
+                    'project_name': project_name,
+                    'mongodb_config_filepath': mongodb_config_filepath,
                     'z_offset': z_offset, 
                     'xy_offset': xy_offset,
                     'local_z_min': ds_bounds[dataset_name][0],
@@ -225,7 +233,7 @@ def align_dataset_z(config_paths,
                                    'path': destination_path,
                                            },
                                'metadata':{
-                                   'shape': dest_shape,
+                                   'shape': dest_shape.tolist(),
                                    'chunks':[1,512,512]
                                            },
                                'transform': {'input_labels': ['z', 'y', 'x']}
@@ -240,7 +248,7 @@ def align_dataset_z(config_paths,
                                    'path': destination_path + '_mask',
                                            },
                                'metadata':{
-                                   'shape': dest_shape,
+                                   'shape': dest_shape.tolist(),
                                    'chunks':[1,512,512]
                                            },
                                'transform': {'input_labels': ['z', 'y', 'x']}
@@ -260,7 +268,7 @@ def align_dataset_z(config_paths,
                                    'path': ds_project_output_path,
                                            },
                                'metadata':{
-                                   'shape': dest_shape,
+                                   'shape': dest_shape.tolist(),
                                    'chunks':[1,512,512]
                                            },
                                'transform': {'input_labels': ['z', 'y', 'x']}
@@ -309,11 +317,13 @@ def align_dataset_z(config_paths,
             with open(config_path, 'r') as f:
                 config = json.load(f)
             config['num_workers'] = num_workers
+            config['wipe_progress_flag'] = (dataset_name == wipe_progress_stack)
 
             # Start alignment
             try:
                 params = signature(align_stack_z).parameters
-                align_stack_z(**{k: v for k, v in config.items() if k in params})
+                relevant_args = {k: v for k, v in config.items() if k in params}
+                align_stack_z(**relevant_args)
             except Exception as e:
                 raise RuntimeError(f'Error with {dataset_name}: ' + str(e))
             
@@ -379,6 +389,11 @@ if __name__ == '__main__':
                         default=False,
                         action='store_true',
                         help='Deletes existing output dataset and start over. Default: False')
+    parser.add_argument('--wipe-progress',
+                        dest='wipe_progress_stack',
+                        type=str,
+                        default=None,
+                        help='Wipe progress for a specific stack before starting.')
 
     args=parser.parse_args()
 
