@@ -60,7 +60,7 @@ def align_stack_z(destination_path,
     db = get_mongo_db(client, project_name)
 
     if wipe_progress_flag:
-        logging.info(f"Wiping progress for stack: {dataset_name}")
+        logging.info(f'Wiping progress for stack: {dataset_name}')
         wipe_progress(db, dataset_name)
 
     #---------- Prepare variables ----------#
@@ -210,7 +210,7 @@ def align_stack_z(destination_path,
     # The ratio is what matters for how much the data is deformed
     # However smaller numbers might limit the necessary deformation of the mesh
     # Good values:
-    # k0 = 0.01 # inter-section springs (elasticity). High k0 results in images that tend to "fold" onto themselves
+    # k0 = 0.01 # inter-section springs (elasticity). High k0 results in images that tend to 'fold' onto themselves
     # k = 0.4 # intra-section springs (elasticity). Increase if data deforms too much
     # gamma = 0.5 # dampening factor. Increase if data drift over time
     out_path_meshes = os.path.dirname(destination_path) + '/flow_meshes'
@@ -257,7 +257,8 @@ def align_stack_z(destination_path,
     # Start alignment
     output_shape = np.max(transform[:,:,-1], axis=0).astype(int)
     skipped = 0
-    step_name = "render_z"
+    empty = 0
+    step_name = 'render_z'
     for z in tqdm(range(start, dataset.domain.exclusive_max[0]),
                     position=0,
                     desc=f'{dataset_name}: Rendering aligned slices'):
@@ -271,8 +272,8 @@ def align_stack_z(destination_path,
 
         if not data.any():
             # If empty slice, skip and go to next z
-            skipped += 1
-            metadata = {'skipped': True, 'empty_slice': True}
+            empty += 1
+            metadata = {'empty_slice': True}
             local_slice_index = z - dataset.domain.inclusive_min[0]
             log_progress(db, dataset_name, step_name, z, local_slice_index, metadata)
             continue
@@ -339,14 +340,16 @@ def align_stack_z(destination_path,
                    1, None)
 
         metadata = {
-            'skipped': False,
+            'empty_slice': False,
             'warp_config': warp_config,
             'mesh_config': mesh_config,
             'bbox': [int(y1), int(y2), int(x1), int(x2)]
         }
         local_slice_index = z - dataset.domain.inclusive_min[0]
         log_progress(db, dataset_name, step_name, z, local_slice_index, metadata)
-    logging.info(f'{dataset_name}: Done. ({skipped} empty slices)')
+    logging.info(f'{dataset_name}: Done.')
+    logging.info(f'Empty slices: {empty}')
+    logging.info(f'Skipped already processed slices: {skipped}')
 
     # Add an attribute to keep track of what datasets have been aligned already
     attrs['z_aligned'] = True
