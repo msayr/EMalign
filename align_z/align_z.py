@@ -54,8 +54,7 @@ def _compute_flow(dataset,
                   dataset_mask=None,
                   ref_slice=None,
                   ref_slice_mask=None,
-                  transformations=None,
-                  save_transform=True):
+                  transformations=None):
     
     mfc = flow_field.JAXMaskedXCorrWithStatsCalculator()
     original_shape = dataset.shape if original_shape is None else original_shape
@@ -244,13 +243,13 @@ def _compute_flow(dataset,
             if z != start:
                 flows.append(flow)
                 dataset_flow, _ = write_flow(dataset_flow, flow, z)
-                if save_transform:
-                    dataset_trsf, _ = write_trsf(dataset_trsf, t, z)
+                dataset_trsf, _ = write_trsf(dataset_trsf, t, z)
 
             # Log progress
             metadata = {
                 'z_prev': z_prev,
                 'skipped': True,
+                'empty_slice': False,
                 'scale': scale
             }
             local_slice_index = z - dataset.domain.inclusive_min[0]
@@ -267,6 +266,7 @@ def _compute_flow(dataset,
             metadata = {
                 'z_prev': z_prev,
                 'skipped': True,
+                'empty_slice': True,
                 'scale': scale
             }
             local_slice_index = z - dataset.domain.inclusive_min[0]
@@ -320,16 +320,16 @@ def _compute_flow(dataset,
             assert (np.array(prev.shape) == np.array(curr.shape)).all()
             assert (np.array(prev_mask.shape) == np.array(curr_mask.shape)).all()
             assert np.any(prev_mask & curr_mask)
+
             # Compute flow
             flow = mfc.flow_field(prev, curr, (patch_size, patch_size),
                                   (stride, stride), batch_size=128,
                                   pre_mask=~prev_mask, post_mask=~curr_mask)
-            # Save to file + database
             flows.append(flow)
 
+            # Save to file + database
             dataset_flow, _ = write_flow(dataset_flow, flow, z)
-            if save_transform:
-                dataset_trsf, _ = write_trsf(dataset_trsf, t, z)
+            dataset_trsf, _ = write_trsf(dataset_trsf, t, z)
 
             # Log progress
             metadata = {
@@ -341,7 +341,8 @@ def _compute_flow(dataset,
                 'ref_offset': ref_offset, 
                 'valid_estimate': valid_estimate,
                 'scale': scale,
-                'skipped': False
+                'skipped': False,
+                'empty_slice': False,
             }
             local_slice_index = z - dataset.domain.inclusive_min[0]
             log_progress(db, dataset_name, step_name, z, local_slice_index, metadata)
