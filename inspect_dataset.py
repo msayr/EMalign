@@ -12,7 +12,7 @@ from emalign.visualize.nglancer import add_layers, start_nglancer_viewer
 
 def read_data(
             dataset_path,
-            data_range=None,
+            bounding_box=None,
             keep_missing=False):
     
     spec = {'driver': 'zarr',
@@ -24,17 +24,29 @@ def read_data(
                       read=True,
                       ).result()
     
-    if data_range is None:
+    if bounding_box is None:
         data = dataset[:].read().result()
     else:
-        z0 = data_range[0]
-        if len(data_range) == 2:
-            # Bound range to the possible values
-            z1 = min(data_range[1], dataset.domain.exclusive_max[0])
-        elif len(data_range) == 1:
-            # Only one value, means we go from that value to the end
-            z1 = dataset.domain.exclusive_max[0]
-        data = dataset[z0:z1].read().result()
+        # bounding_box: min_z, max_z, min_y, max_y, min_x, max_x
+
+        # Z axis
+        z0 = max(bounding_box[0], 0)
+        z1 = min(bounding_box[1], dataset.domain.exclusive_max[0])
+
+        if len(bounding_box) > 2:
+            # Y axis
+            y0 = max(bounding_box[2], 0)
+            y1 = min(bounding_box[3], dataset.domain.exclusive_max[1])
+            
+            # X axis
+            x0 = max(bounding_box[4], 0)
+            x1 = min(bounding_box[5], dataset.domain.exclusive_max[2])
+        else:
+            # Y axis
+            y0 = x0 = 0
+            y1, x1 = dataset.domain.exclusive_max[1:]
+
+        data = dataset[z0:z1, y0:y1, x0:x1].read().result()
 
     if not keep_missing:
         data = data[data.any(axis=(1,2))]
@@ -44,7 +56,7 @@ def read_data(
 
 def inspect_dataset(
             dataset_path,
-            data_range=[0],
+            bounding_box=None,
             keep_missing=False,
             project_configs=[],
             mode=None,
@@ -67,11 +79,7 @@ def inspect_dataset(
             all_ds: Reads data within data_range from all the datasets found in the provided store.
         bind_port (int, optional): Port to bind the neuroglancer viewer to. Defaults to 55555.
     '''
-    
-    modes = ['z_transitions', 'all_ds']
-    if mode is not None and mode not in modes:
-        raise ValueError(f'Invalid mode. Must be one of: {modes}')
-
+  
     if print_shape:
         spec = {'driver': 'zarr',
                 'kvstore': {
@@ -84,21 +92,33 @@ def inspect_dataset(
                           ).result()
         print(f'Dataset shape (ZYX):\n    {dataset.shape}')
         sys.exit()
+        
+    modes = ['z_transitions', 'all_ds']
+    if mode is not None and mode not in modes:
+        raise ValueError(f'Invalid mode. Must be one of: {modes}')
 
+    if bounding_box is None:
+        voxel_offset = [0,0,0]
+    elif len(bounding_box) == 2:
+        voxel_offset = [0, 0, bounding_box[0]]
+    else:
+        voxel_offset = [bounding_box[4], bounding_box[2], bounding_box[0]]    
     
     # Start viewer
     viewer = start_nglancer_viewer(bind_address='localhost',
                                    bind_port=bind_port)
     print('Neuroglancer viewer: ' + viewer.get_viewer_url())
     print('Please wait for images to load (CTRL+C to cancel).')
+    if not keep_missing:
+        print(f'Missing slices will be discarded. Coordinates along the Z axis may be wrong.')
     
     # Prepare data
     dataset_name = os.path.basename(os.path.abspath(dataset_path))
     if mode is None:
-        d = read_data(dataset_path, data_range=tuple(data_range), keep_missing=keep_missing)
+        d = read_data(dataset_path, bounding_box=bounding_box, keep_missing=keep_missing)
         add_layers([d], 
                    viewer, 
-                   voxel_offsets=[[0,0,data_range[0]]],
+                   voxel_offsets=[voxel_offset],
                    names=[dataset_name])
     elif mode == 'z_transitions':
         dataset_paths = []
@@ -116,14 +136,14 @@ def inspect_dataset(
             data_range = [int(z - max(1, window/2)), int(z + max(1, window/2))]
 
             try:
-                d = read_data(dataset_path, data_range=tuple(data_range), keep_missing=keep_missing)
+                d = read_data(dataset_path, bounding_box=bounding_box, keep_missing=keep_missing)
             except:
                 continue
             visible = z == z_offsets[0]
             add_layers([d], 
                        viewer, 
                        names=[f'{dataset_name}_{z}'], 
-                       voxel_offsets=[[0,0,data_range[0]]],
+                       voxel_offsets=[voxel_offset],
                        visible=visible,
                        clear_viewer=False)
     elif mode == 'all_ds':
@@ -136,7 +156,7 @@ def inspect_dataset(
             add_layers([d], 
                        viewer, 
                        names=[dataset_name], 
-                       voxel_offsets=[[0,0,data_range[0]]],
+                       voxel_offsets=[voxel_offset],
                        visible=visible,
                        clear_viewer=False)
     input('All data loaded. Press ENTER or ESCAPE to exit.')
@@ -153,14 +173,14 @@ if __name__ == '__main__':
                         type=str,
                         default=None,
                         help='Path to the zarr container containing the final alignment.')
-    parser.add_argument('--data-range',
+    parser.add_argument('--bbox',
                         metavar='DATA_RANGE',
-                        dest='data_range',
+                        dest='bounding_box',
                         nargs='+',
                         type=int,
-                        default=[0],
-                        help='Range of slice indices to show. One value will be consider as the lower bound.' \
-                             'If too high, will be bounded to the max possible value.')
+                        default=None,
+                        help='Bounding box of ZYX coordinates (min_z, max_z, min_y, max_y, min_x, max_x)'\
+                             'If only two values are given, will be considered as Z range. If too high, will be bounded to the max possible value.')
     parser.add_argument('--keep-missing',
                         dest='keep_missing',
                         default=False,
