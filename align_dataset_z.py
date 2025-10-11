@@ -22,6 +22,7 @@ from emprocess.utils.io import get_dataset_attributes, set_dataset_attributes
 
 from emalign.align_z.utils import compute_alignment_path, determine_initial_offset, get_ordered_datasets
 from emalign.scripts.align_stack_z import align_stack_z
+from emalign.io.progress import get_mongo_client, get_mongo_db, wipe_progress
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger('absl').setLevel(logging.WARNING)
@@ -48,7 +49,6 @@ def align_dataset_z(config_paths,
         # Load dataset paths from z configs
         output_configs_dir = config_paths[0]
         config_paths = glob(os.path.join(output_configs_dir, 'z*.json'))
-
         with open(config_paths[0], 'r') as f:
             first_config = json.load(f)
             project_name = first_config.get('project_name')
@@ -114,7 +114,7 @@ def align_dataset_z(config_paths,
     logging.info('Datasets Z offsets:')
     for dataset, z in zip(datasets, z_offsets):
         yx_res = get_dataset_attributes(dataset)['resolution'][1:]
-        logging.info(f'    {z[0]} (res: {yx_res}): {dataset.kvstore.path.split("/")[-1]}')
+        logging.info(f'    {z[0]} (res: {yx_res}): {os.path.basename(os.path.abspath(dataset.kvstore.path))}')
 
     if isinstance(yx_target_resolution, list):
         yx_target_resolution = np.min(yx_target_resolution, axis=0).tolist()
@@ -126,12 +126,16 @@ def align_dataset_z(config_paths,
         if start_over:
             create_configs = True
             try:
-                input('WARNING: Progress will be wiped and all datasets will be processed.\nPress ENTER/ESC to resume or CTRL+C to abord\n')
+                input('WARNING: All progress will be wiped and all datasets will be processed.\nPress ENTER/ESC to resume or CTRL+C to abord\n')
             except KeyboardInterrupt:
                 print('\nExiting...')
                 sys.exit()
-            
+
+            client = get_mongo_client(mongodb_config_filepath)
+            db = get_mongo_db(client, project_name)
             for dataset in datasets:
+                dataset_name = os.path.basename(os.path.abspath(dataset.kvstore.path))
+                wipe_progress(db, dataset_name)
                 attrs = get_dataset_attributes(dataset)
                 attrs['z_aligned'] = False
                 set_dataset_attributes(dataset, attrs)
