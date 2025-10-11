@@ -13,7 +13,7 @@ def get_mongo_client(config_file=None):
             config = json.load(f)
         return MongoClient(**config)
     else:
-        return MongoClient()
+        return MongoClient(None)
 
 def get_mongo_db(client, project_name):
     '''
