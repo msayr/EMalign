@@ -62,6 +62,9 @@ def align_stack_z(destination_path,
     if wipe_progress_flag:
         logging.info(f'Wiping progress for stack: {dataset_name}')
         wipe_progress(db, dataset_name)
+        
+        # Since we wipe progress, we also want to make sure that all old data will be overwritten properly
+        overwrite = True
 
     #---------- Prepare variables ----------#
     # Flow parameters
@@ -170,7 +173,7 @@ def align_stack_z(destination_path,
                                         reverse=True)
         first_slice_mask = destination_mask[z].read().result()
     elif dataset.shape[0] > 1:
-        # More than one images
+        # More than one image
         first_slice_mask = None
     else:
         # No need to compute flow because we only have one image and it is the first one
@@ -266,7 +269,7 @@ def align_stack_z(destination_path,
         start = z + 1
     else:
         # All slices have to be warped to match the last slice of the previous stack
-        start = 0 + dataset.domain.inclusive_min[0]
+        start = dataset.domain.inclusive_min[0]
 
     # Start alignment
     output_shape = np.max(transform[:,:,-1], axis=0).astype(int)
@@ -277,20 +280,20 @@ def align_stack_z(destination_path,
                     position=0,
                     desc=f'{dataset_name}: Rendering aligned slices'):
 
-        if check_progress(db, dataset_name, step_name, z) and not overwrite:
+        if check_progress(db, dataset_name, step_name, z):
             skipped += 1 # Assume skipped slices are logged correctly
             continue
 
         # Load data
         data = dataset[z].read().result()
+        global_z = z + z_offset - dataset.domain.inclusive_min[0]
 
         if not data.any():
             # If empty slice, skip and go to next z
             empty += 1
             skipped += 1
             metadata = {'empty_slice': True}
-            local_slice_index = z - dataset.domain.inclusive_min[0]
-            log_progress(db, dataset_name, step_name, z, local_slice_index, metadata)
+            log_progress(db, dataset_name, step_name, z, global_z, metadata)
             continue
 
         # Resample if needed (target_scale != 1)
@@ -311,11 +314,7 @@ def align_stack_z(destination_path,
                                              size=(data.shape[-1], data.shape[-2], 1))
         
         # Warp data in parallel. warp_subvolume uses one thread per image so we use ndimage_wrap instead
-        if first_slice is None:
-            inv_z = z - skipped
-        else:
-            inv_z = z + 1 - skipped
-
+        inv_z = z - start + 1
         aligned = ndimage_warp(
                         data, 
                         inv_map[:, inv_z, ...], 
@@ -341,8 +340,7 @@ def align_stack_z(destination_path,
         if overwrite:
             # There may be data written to this slice so let's make sure it is overwritten
             y1 = x1 = 0
-            y2 = destination.shape[1]
-            x2 = destination.shape[2]
+            y2, x2 = destination.shape[1:]
             aligned = pad_to_shape(aligned, destination.shape[1:])
             aligned_mask = pad_to_shape(aligned_mask, destination.shape[1:])
             write_mask = None # This means we write everything even black space
@@ -352,7 +350,6 @@ def align_stack_z(destination_path,
             write_mask = aligned_mask[y1:y2, x1:x2]
         
         # Write data
-        global_z = z + z_offset - dataset.domain.inclusive_min[0]
         write_data(destination, 
                    aligned[y1:y2, x1:x2], # Only write in the bounding box where the data is
                    global_z, # z_offset relates to original minimum

@@ -238,7 +238,7 @@ def _compute_flow(dataset,
         
         if z in ignore_slices:
             pbar.set_description(f'{dataset_name}: Ignoring slice...')
-            # Slice is to ignore for flow computation based on user input, but we will keep it otherwise
+            # Slice is to be ignored for flow computation based on user input, but we will keep it otherwise
             # We reuse the previous flow for alignment
             if z != start:
                 flows.append(flow)
@@ -263,6 +263,8 @@ def _compute_flow(dataset,
         
         # If empty slice, skip and compare to next one
         if not curr.any():
+            # We should be starting with a non-empty slice, so by the time we hit this, flow should exist
+            flows.append(np.empty_like(flow) * np.nan)
             # Log progress
             metadata = {
                 'z_prev': z_prev,
@@ -569,7 +571,12 @@ def get_inv_map_mod(flow, stride, dataset_name, mesh_config=None):
     all_vmax = []
     for z in tqdm(range(0, flow.shape[1]),
                   desc=f'{dataset_name}: Relaxing mesh'):
-        prev = map_utils.compose_maps_fast(flow[:, z:z+1, ...], origin, stride,
+        f = flow[:, z:z+1, ...]
+        if np.isnan(f).all():
+            # No flow was computed for this slice, ignore it for mesh relaxation
+            solved.append(np.zeros_like(flow[:, 0:1, ...]))
+            continue
+        prev = map_utils.compose_maps_fast(f, origin, stride,
                                            solved[-1], origin, stride)
         x, _, _, v_max = relax_mesh_mod(np.zeros_like(solved[0]), prev, mesh_config)
         solved.append(np.array(x))
