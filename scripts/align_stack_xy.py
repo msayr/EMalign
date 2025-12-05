@@ -20,13 +20,11 @@ import argparse
 
 from tqdm import tqdm
 
-from emprocess.utils.io import set_dataset_attributes
-
 from emalign.align_xy.render import render_slice_xy
 from emalign.align_xy.stitch_ongrid import get_coarse_offset, get_elastic_mesh
 from emalign.arrays.stacks import Stack, parse_stack_info
 from emalign.arrays.tile_map import get_tile_map_margins
-from emalign.io import open_store
+from emalign.io import open_store, set_store_attributes
 from emalign.io.progress import get_mongo_client, get_mongo_db, log_progress, check_progress, wipe_progress
 
 
@@ -222,8 +220,8 @@ def align_stack_xy(output_path,
                   'resolution': list(map(int, (50, *resolution))),
                   'voxel_size': list(map(int, (50, *resolution)))}
 
-    set_dataset_attributes(dataset, attributes)
-    set_dataset_attributes(dataset_mask, attributes)
+    set_store_attributes(dataset, attributes)
+    set_store_attributes(dataset_mask, attributes)
 
     return True
 
