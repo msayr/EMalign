@@ -155,14 +155,40 @@ def open_store(
         return ts.open(spec, **kwargs).result()
     
 
-def set_store_attributes(store, attrs):
-    with open(os.path.join(store.kvstore.path, '.zattrs'), 'w') as f:
+def set_store_attributes(store: ts.TensorStore, attrs: dict) -> bool:
+    '''Set attributes for a Zarr store.
+
+    Args:
+        store (tensorstore.TensorStore): The store to set attributes for.
+        attrs (dict): Dictionary of attributes to store.
+
+    Returns:
+        bool: True if successful.
+
+    Raises:
+        IOError: If the .zattrs file cannot be written.
+    '''
+    attrs_path = os.path.join(store.kvstore.path, '.zattrs')
+    with open(attrs_path, 'w') as f:
         json.dump(attrs, f, indent=2)
     return True 
 
 
-def get_store_attributes(store):
-    with open(os.path.join(store.kvstore.path, '.zattrs'), 'r') as f:
+def get_store_attributes(store: ts.TensorStore) -> dict:
+    '''Get attributes from a Zarr store.
+
+    Args:
+        store (tensorstore.TensorStore): The store to read attributes from.
+
+    Returns:
+        dict: Dictionary of stored attributes.
+
+    Raises:
+        IOError: If the .zattrs file cannot be read.
+        json.JSONDecodeError: If the .zattrs file contains invalid JSON.
+    '''
+    attrs_path = os.path.join(store.kvstore.path, '.zattrs')
+    with open(attrs_path, 'r') as f:
         attrs = json.load(f)
     return attrs
 
