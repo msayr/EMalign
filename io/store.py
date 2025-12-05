@@ -171,7 +171,7 @@ def set_store_attributes(store: ts.TensorStore, attrs: dict) -> bool:
     attrs_path = os.path.join(store.kvstore.path, '.zattrs')
     with open(attrs_path, 'w') as f:
         json.dump(attrs, f, indent=2)
-    return True 
+    return True
 
 
 def get_store_attributes(store: ts.TensorStore) -> dict:
@@ -193,72 +193,340 @@ def get_store_attributes(store: ts.TensorStore) -> dict:
     return attrs
 
 
-# WRITE
-def write_slice(dataset, arr, z, x_offset=0, y_offset=0):
+def write_ndarray(
+    dataset: ts.TensorStore,
+    arr: np.ndarray,
+    z: int,
+    xy_offset: Optional[List[int]] = None,
+    resolve: bool = True
+) -> tuple:
+    '''Write an N-dimensional array to a tensor store dataset at a specific z-index.
 
-    y,x = arr.shape
-    new_max = np.array([z+1, y+y_offset, x+x_offset], dtype=int)
+    This is the core write function that handles all dimensionalities and indexing patterns.
+    Automatically resizes the dataset if needed.
+
+    Args:
+        dataset (tensorstore.TensorStore): The tensorstore to write to.
+        arr (np.ndarray): N-dimensional array to write. Supported shapes:
+            - 2D [y, x] for writing to 3D [z, y, x] datasets
+            - 3D [c, y, x] for writing to 4D [z, c, y, x] datasets (e.g., flow fields)
+            - 2D [a, b] for writing to 3D [z, a, b] datasets (e.g., transformation matrices)
+        z (int): Z-index where to write the data (first dimension).
+        xy_offset (list of int or None): Optional offsets for non-z spatial dimensions, for 2D arrays.
+            Default: None (all offsets = 0).
+        resolve (bool): If True, calls dataset.resolve().result() to refresh metadata
+            before checking bounds. Recommended for correctness. Default: True.
+
+    Returns:
+        tuple: (updated_dataset, write_result) where updated_dataset is the potentially
+            resized dataset and write_result is the tensorstore write operation result.
+
+    Raises:
+        ValueError: If validation fails (negative offsets, etc.).
+
+    Examples:
+        Write 2D slice to 3D dataset at z=10 with offsets:
+        >>> ds, result = write_ndarray(dataset, img, 10, offsets=[50, 100])
+
+        Write 4D flow [4, y, x] to [z, c, y, x] at z=5:
+        >>> ds, result = write_ndarray(flow_ds, flow, 5)
+
+        Write 2x4 matrix to [z, a, b] at z=3:
+        >>> ds, result = write_ndarray(trsf_ds, matrix, 3)
+    '''
+    # Resolve dataset to get fresh metadata
+    if resolve:
+        dataset = dataset.resolve().result()
+
+    # Handle offsets
+    xy_offset = xy_offset or []
+    if xy_offset and any(o < 0 for o in xy_offset):
+        raise ValueError(f'Offsets must be non-negative, got {xy_offset}')
+
+    # Determine indexing based on array dimensionality
+    if arr.ndim == 2:
+        # Case 1: 2D array -> 3D dataset [z, y, x] OR matrix dataset [z, a, b]
+        y, x = arr.shape
+        x_off, y_off = xy_offset if xy_offset is not None else [0,0]
+
+        # Calculate required bounds
+        new_max = np.array([z+1, y+y_off, x+x_off], dtype=int)
+        current_max = np.array(dataset.domain.exclusive_max, dtype=int)
+
+        if np.any(current_max < new_max):
+            new_max = np.max([current_max, new_max], axis=0)
+            dataset = dataset.resize(exclusive_max=new_max, expand_only=True).result()
+
+        # Write with slice notation for 3D indexing
+        write_result = dataset[z:z+1, y_off:y+y_off, x_off:x+x_off].write(arr).result()
+
+    elif arr.ndim == 3:
+        # Case 2: 3D array [c, y, x] -> 4D dataset [z, c, y, x]
+        c, y, x = arr.shape
+
+        # Calculate required bounds
+        new_max = np.array([z+1, c, y, x], dtype=int)
+        current_max = np.array(dataset.domain.exclusive_max, dtype=int)
+
+        if np.any(current_max < new_max):
+            new_max = np.max([current_max, new_max], axis=0)
+            dataset = dataset.resize(exclusive_max=new_max, expand_only=True).result()
+
+        # Write directly at z-index (no slice notation for first dim)
+        write_result = dataset[z, :, :y, :x].write(arr).result()
+
+    else:
+        raise ValueError(f'Unsupported array dimensionality: {arr.ndim}. Expected 2D or 3D.')
+
+    return dataset, write_result
+
+
+def write_ndarray_with_mask(
+    dataset: ts.TensorStore,
+    arr: np.ndarray,
+    z: int,
+    mask: Optional[np.ndarray] = None,
+    xy_offset: Optional[List[int]] = None
+) -> tuple:
+    '''Write array to dataset with optional masking to preserve existing data.
+
+    This function reads existing data from the dataset, applies the mask to merge new
+    and existing values, then writes back. Useful when writing to a slice that was processed 
+    with an overlapping dataset.
+
+    Args:
+        dataset (tensorstore.TensorStore): Tensorstore dataset to write to.
+        arr (np.ndarray): Array to write (typically 2D [y, x]).
+        z (int): Z-index where to write.
+        mask (np.ndarray or None): Boolean mask indicating which pixels to update
+            (True = write new value, False = preserve existing value). Must have
+            same shape as arr. If None, writes entire array (equivalent to write_ndarray).
+        xy_offset (list of int or None): Offsets for non-z spatial dimensions.
+
+    Returns:
+        tuple: (dataset, write_result) where dataset is the potentially resized dataset
+            and write_result is the tensorstore write operation result.
+
+    Raises:
+        ValueError: If mask shape doesn't match arr shape.
+
+    Examples:
+        Only write pixels where mask is True:
+        >>> ds, result = write_with_mask(dataset, aligned, z=10, mask=valid_mask,
+        ...                               offsets=[50, 100])
+
+        Write entire array (mask=None, equivalent to write_ndarray):
+        >>> ds, result = write_with_mask(dataset, img, z=5, offsets=[0, 0])
+    '''
+    xy_offset = xy_offset or []
+
+    # If no mask, just use write_ndarray
+    if mask is None:
+        return write_ndarray(dataset, arr, z, xy_offset=xy_offset, resolve=True)
+
+    # Validate mask shape
+    if mask.shape != arr.shape:
+        raise ValueError(f'Mask shape {mask.shape} must match array shape {arr.shape}')
+
+    # Only supports 2D arrays currently
+    if arr.ndim != 2:
+        raise ValueError(f'write_with_mask currently only supports 2D arrays, got {arr.ndim}D')
+
+    # Resolve dataset to get fresh metadata
+    dataset = dataset.resolve().result()
+
+    y, x = arr.shape
+    x_off, y_off = xy_offset if xy_offset is not None else [0,0]
+
+    # Ensure dataset is large enough (resize if needed, but don't write yet)
+    new_max = np.array([z+1, y+y_off, x+x_off], dtype=int)
     current_max = np.array(dataset.domain.exclusive_max, dtype=int)
+
     if np.any(current_max < new_max):
         new_max = np.max([current_max, new_max], axis=0)
         dataset = dataset.resize(exclusive_max=new_max, expand_only=True).result()
-    try:
-        return dataset, dataset[z:z+1, y_offset:y+y_offset, x_offset:x+x_offset].write(arr).result()
-    except Exception as e:
-        raise e
+
+    # Read existing data (this will be zeros if slice doesn't exist yet)
+    og_data = dataset[z, y_off:y+y_off, x_off:x+x_off].read().result()
+
+    # Merge: keep existing data where mask is False, use new data where mask is True
+    og_data[mask] = arr[mask]
+
+    # Write merged data
+    write_result = dataset[z, y_off:y+y_off, x_off:x+x_off].write(og_data).result()
+
+    return dataset, write_result
+
+
+def write_data(
+    dataset: ts.TensorStore,
+    arr: np.ndarray,
+    z: int,
+    xy_offset: Optional[np.ndarray] = None,
+    preserve_mask: np.ndarray = None,
+    downsample_factor: Optional[float] = 1.0,
+    resolve: bool = True
+    ) -> tuple:
+    '''Write array data to a TensorStore dataset with optional downsampling and masking.
+
+    Parameters
+    ----------
+    dataset : ts.TensorStore
+        Target TensorStore dataset to write to.
+    arr : np.ndarray
+        Array data to write. Must be 2D for image data.
+    z : int
+        Z-index (slice number) where data should be written.
+    xy_offset : Optional[np.ndarray], default=None
+        [x, y] offset for positioning data within the slice. If None, writes at [0, 0].
+    preserve_mask : np.ndarray, default=None
+        Boolean mask indicating which pixels to write. If provided, existing data
+        in the dataset is preserved where mask is False. If None, entire array is written.
+    downsample_factor : Optional[float], default=1.0
+        Factor to downsample array before writing (must be <= 1.0). Values < 1.0
+        will resample the array and offset accordingly.
+    resolve : bool, default=True
+        Whether to resolve the dataset before writing (only used when preserve_mask is None).
+
+    Returns
+    -------
+    tuple
+        (dataset, write_result) - The updated dataset and TensorStore write result.
+
+    Raises
+    ------
+    ValueError
+        If downsample_factor > 1.0 (upsampling not supported).
+    '''
+    if downsample_factor > 1:
+        raise ValueError('Downsample factor cannot be higher than 1 (upsampling).')
+    elif downsample_factor < 1:
+        arr = resample(arr, downsample_factor)
+        xy_offset *= downsample_factor
+
+        if preserve_mask is not None:
+            preserve_mask = resample(preserve_mask, downsample_factor)
+
+    if preserve_mask is not None:
+        return write_ndarray_with_mask(dataset, arr, z, preserve_mask, xy_offset)
+
+    return write_ndarray(dataset, arr, z, xy_offset, resolve)
 
 
 # READ
-def find_ref_slice(dataset, z=None, reverse=False):
+def find_ref_slice(dataset: ts.TensorStore, z: Optional[int] = None,
+                   reverse: bool = False, max_depth: Optional[int] = float('inf')) -> tuple:
+    '''Find first or last non-empty slice of an image stack.
 
-    '''Find first or last non-black slice of an image stack.
+    Searches for a slice that contains non-zero values, starting from a given z-index
+    or from the beginning/end of the stack.
 
     Args:
         dataset (tensorstore.TensorStore): A dataset containing the image data.
-        z (int or None): Z index to start from (axis=0). If None, will pick a start based on reverse. Default: None.
-        reverse (bool): Whether to look for images at indices higher than z (False) or lower than z (True). Default: False.
-    
+        z (int or None): Z index to start from (axis=0). If None, will start from the
+            beginning (if reverse=False) or end (if reverse=True). Default: None.
+        reverse (bool): Search direction. If False, searches forward (increasing z).
+            If True, searches backward (decreasing z). Default: False.
+        max_depth (int or float('inf')): Maximum number of slices to visit before 
+            giving up the search. Default: float('inf') (no max depth)
+
     Returns:
-        tuple: tuple of image np.ndarray and corresponding z index.
+        tuple: (image, z_index) where image is a 2D np.ndarray and z_index is the
+            corresponding z coordinate.
+
+    Raises:
+        IndexError: If no non-empty slice is found within dataset bounds.
+
+    Note:
+        This function may hang if the entire dataset contains only zeros.
     '''
-    
     increment = -1 if reverse else 1
 
-    if z is None and reverse:
-        z = dataset.domain.exclusive_max[0] - 1 
-    elif z is None:
-        z = dataset.domain.inclusive_min[0]
+    if z is None:
+        z = dataset.domain.exclusive_max[0] - 1 if reverse else dataset.domain.inclusive_min[0]
+
+    z_min = dataset.domain.inclusive_min[0]
+    z_max = dataset.domain.exclusive_max[0] - 1
 
     img = dataset[z].read().result()
 
+    # Add bounds checking to prevent infinite loop
+    count = 0
     while not img.any():
+        if count >= max_depth:
+            raise IndexError(f'No non-empty slice found in dataset before reaching max search depth (searched z range: {z_min} to {z_max})')
         z += increment
+        if z < z_min or z > z_max:
+            raise IndexError(f'No non-empty slice found in dataset (searched z range: {z_min} to {z_max})')
         img = dataset[z].read().result()
+        count += 1
+
     return img, z
 
 
-def get_data_samples(dataset, step_slices, yx_target_resolution):
+def get_data_samples(dataset: ts.TensorStore, step_slices: int,
+                     yx_target_resolution: Union[List[float], np.ndarray]) -> np.ndarray:
+    '''Sample slices from a dataset at regular intervals with optional resampling to a target resolution.
 
-    resolution = np.array(get_dataset_attributes(dataset)['resolution'])[1:]
+    Extracts slices at regular z-intervals, skipping empty slices, and resamples them
+    to match a target resolution if needed.
 
-    z_max = dataset.domain.exclusive_max[0]-1
+    Args:
+        dataset (tensorstore.TensorStore): 3D dataset to sample from.
+        step_slices (int): Number of slices to skip between samples. A value of 1
+            means every slice, 2 means every other slice, etc.
+        yx_target_resolution (list or np.ndarray): Target YX resolution in nanometers.
+            Should be a 1D array or list of length 2: [y_resolution, x_resolution].
 
-    z_list = np.arange(0, z_max, step_slices)
-    z_list = np.append(z_list, z_max) if z_max not in z_list else z_list    
+    Returns:
+        np.ndarray: 3D array of sampled slices with shape [n_samples, y, x], where
+            spatial dimensions match the target resolution.
+
+    Raises:
+        RuntimeError: If dataset pixel size is higher (worse) than target resolution,
+            as upsampling would be required.
+        KeyError: If dataset attributes don't contain 'resolution' field.
+        IndexError: If unable to find non-empty slices.
+
+    Note:
+        - Empty slices (all zeros) are automatically skipped by advancing to the next slice
+        - Resolution downsampling uses cv2.resize for interpolation
+        - The last slice is always included in the sample
+    '''
+    resolution = np.array(get_store_attributes(dataset)['resolution'])[1:]
+    yx_target_resolution = np.asarray(yx_target_resolution)
+
+    z_min = dataset.domain.inclusive_min[0]
+    z_max = dataset.domain.exclusive_max[0] - 1
+
+    z_list = np.arange(z_min, z_max + 1, step_slices)
+    # Ensure last slice is included
+    if z_max not in z_list:
+        z_list = np.append(z_list, z_max)
 
     data = []
     for z in z_list:
         arr = dataset[z].read().result()
+
+        # Skip empty slices
         while not arr.any():
             z += 1
+            if z > z_max:
+                raise IndexError(f'No non-empty slice found starting from z={z_list[len(data)]}')
             arr = dataset[z].read().result()
-        
+
+        # Resample if needed
         if np.any(resolution < yx_target_resolution):
-            fy, fx = resolution/yx_target_resolution
-            arr = cv2.resize(arr, None, fx=fx, fy=fy)
+            # Downsample (resolution is better than target)
+            ratio, _ = resolution / yx_target_resolution
+            arr = resample(arr, ratio)
         elif np.any(resolution > yx_target_resolution):
-            raise RuntimeError(f'Dataset resolution ({resolution.tolist()}) must be lower \
-                               than target resolution ({yx_target_resolution.tolist()})')
+            # Would require upsampling - not supported
+            raise RuntimeError(
+                f'Dataset resolution ({resolution.tolist()}) is lower quality than '
+                f'target resolution ({yx_target_resolution.tolist()}). Upsampling not supported.'
+            )
+
         data.append(arr)
 
     return np.array(data)
