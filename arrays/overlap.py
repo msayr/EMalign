@@ -12,6 +12,36 @@ from .utils import compute_laplacian_var_diff, homogenize_arrays_shape, xy_offse
 def get_overlap(img1, img2, offset, rotation=0, pad=0, homogenize_shapes=False):
     '''
     Extract overlapping parts of two images based on an offset and rotation from img2 to img1.
+
+    Parameters:
+    -----------
+    img1 : np.ndarray
+        Reference image
+    img2 : np.ndarray
+        Moving image to align with img1
+    offset : tuple or array-like
+        (x, y) displacement of img2 relative to img1
+    rotation : float, optional
+        Rotation angle in degrees to apply to img2 before computing overlap. Default: 0
+    pad : int, optional
+        Additional padding to extend the overlap region. Default: 0
+    homogenize_shapes : bool, optional
+        If True, ensures both cropped regions have identical shapes by trimming to minimum.
+        Default: False
+
+    Returns:
+    --------
+    tuple of np.ndarray or None
+        (crop1, crop2) - Overlapping regions from img1 and img2 respectively.
+        Returns None if images don't overlap.
+
+    Notes:
+    ------
+    The offset describes how img2 is positioned relative to img1:
+    - Positive x offset: img2 is to the right of img1
+    - Negative x offset: img2 is to the left of img1
+    - Positive y offset: img2 is below img1
+    - Negative y offset: img2 is above img1
     '''
         
     if rotation != 0:
@@ -48,8 +78,45 @@ def get_overlap(img1, img2, offset, rotation=0, pad=0, homogenize_shapes=False):
 
 
 def get_overlap_warp(ref_img, mov_img, ref_mask, mov_mask, M, mov_img_shape, ref_img_offset):
-    
-    mov_img = cv2.warpAffine(mov_img, M, mov_img_shape[::-1])  
+    '''
+    Extract overlapping regions after applying affine transformation and alignment.
+
+    This function warps images and masks using an affine transformation matrix,
+    pads them to match alignment offsets, homogenizes shapes, and extracts the
+    overlapping region based on the intersection of masks.
+
+    Parameters:
+    -----------
+    ref_img : np.ndarray
+        Reference image
+    mov_img : np.ndarray
+        Moving image to be warped and aligned
+    ref_mask : np.ndarray (bool)
+        Boolean mask indicating valid regions in reference image
+    mov_mask : np.ndarray (bool)
+        Boolean mask indicating valid regions in moving image
+    M : np.ndarray
+        2x3 affine transformation matrix for warping
+    mov_img_shape : tuple
+        Target shape (height, width) for the warped moving image
+    ref_img_offset : tuple or array-like
+        (x, y) offset to pad the reference image for alignment
+
+    Returns:
+    --------
+    tuple of np.ndarray
+        (ref_crop, mov_crop) - Cropped overlapping regions from reference and moving images,
+        bounded by the intersection of both masks.
+
+    Notes:
+    ------
+    - The moving image is warped using the affine transformation M
+    - The reference mask is also warped to match the moving image coordinate system
+    - Both images are padded and resized to have identical shapes
+    - The final overlap is determined by the bounding box of (ref_mask & mov_mask)
+    '''
+
+    mov_img = cv2.warpAffine(mov_img, M, mov_img_shape[::-1])
     ref_mask = cv2.warpAffine(ref_mask.astype(np.uint8), M, mov_img_shape[::-1]).astype(bool)
 
     # Pad moving image so it matches the reference
@@ -66,38 +133,82 @@ def get_overlap_warp(ref_img, mov_img, ref_mask, mov_mask, M, mov_img_shape, ref
     return ref_img[y1:y2, x1:x2], mov_img[y1:y2, x1:x2]
 
 
-def check_overlap(img1, 
-                  img2, 
-                  xy_offset, 
-                  theta, 
-                  threshold=0.5, 
-                  scale=(0.3, 0.5), 
+def check_overlap(img1,
+                  img2,
+                  xy_offset,
+                  theta,
+                  threshold=0.5,
+                  scale=(0.3, 0.5),
                   refine=True):
 
     '''
-    Compute a metric describing how well images overlap, based on a given offset and rotation. 
+    Compute a quality metric describing how well two images overlap based on edge content similarity.
+
+    This function uses Laplacian variance to assess the similarity of edge content in the
+    overlapping regions of two images. Optionally, it can refine the alignment using SIFT
+    feature matching if the initial overlap quality is below a threshold.
+
+    Parameters:
+    -----------
+    img1 : np.ndarray
+        Reference image
+    img2 : np.ndarray
+        Moving image to compare with img1
+    xy_offset : tuple or array-like
+        (x, y) offset describing the displacement of img2 relative to img1
+    theta : float
+        Rotation angle in degrees to apply to img2
+    threshold : float, optional
+        Quality threshold below which refinement is triggered if refine is True. Range [0,1].
+        Default: 0.5
+    scale : tuple of float, optional
+        Two scale factors to try for SIFT-based refinement. Default: (0.3, 0.5)
+    refine : bool, optional
+        If True, attempts to refine the overlap using SIFT when quality is below threshold.
+        Default: True
+
+    Returns:
+    --------
+    float
+        Overlap quality metric in range [0,1]:
+        - 1.0: Perfect overlap, identical edge content
+        - 0.0: No overlap or completely different edge content
+        - Values closer to 1 indicate better alignment
+
+    Notes:
+    ------
+    - Uses Laplacian variance to measure edge content similarity
+    - If refinement is enabled and quality < threshold, attempts SIFT-based realignment
+    - Tries two different scale factors for SIFT refinement
+    - Returns 0 if images don't overlap geometrically
     '''
 
     # Index of sharpness using Laplacian
     overlap = get_overlap(img1, img2, xy_offset, theta)
 
     if overlap is not None:
-        overlap1, overlap2, mask = overlap
+        overlap1, overlap2 = overlap
 
-        lap_variance_diff = compute_laplacian_var_diff(overlap1, overlap2, mask)
+        lap_variance_diff = compute_laplacian_var_diff(overlap1, overlap2, mask=None)
 
         if refine and lap_variance_diff < threshold:
             logging.debug('Refining overlap estimation...')
             # Retry the overlap, it can often get better
             try:
-                xy_offset, theta = estimate_transform_sift(overlap1, overlap2, scale=scale[0])
-            except:
-                xy_offset, theta = estimate_transform_sift(overlap1, overlap2, scale=scale[1])
-            res = get_overlap(overlap1, overlap2, xy_offset, theta)
-            
+                refined_offset, refined_theta = estimate_transform_sift(overlap1, overlap2, scale=scale[0])[:2]
+            except Exception as e:
+                logging.debug(f'First scale failed: {e}, trying second scale')
+                try:
+                    refined_offset, refined_theta = estimate_transform_sift(overlap1, overlap2, scale=scale[1])[:2]
+                except Exception as e:
+                    logging.debug(f'Second scale refinement failed: {e}')
+                    return lap_variance_diff
+
+            res = get_overlap(overlap1, overlap2, refined_offset, refined_theta)
+
             if res is not None:
-                overlap1, overlap2, mask = res
-                lap_variance_diff = compute_laplacian_var_diff(overlap1, overlap2, mask)
+                overlap1, overlap2 = res
+                lap_variance_diff = compute_laplacian_var_diff(overlap1, overlap2, mask=None)
             else:
                 lap_variance_diff = 0
     else:
