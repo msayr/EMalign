@@ -5,9 +5,7 @@ import tensorstore as ts
 from typing import List, Optional, Union
 import json
 
-from emprocess.utils.transform import rotate_image
-from emprocess.utils.io import get_dataset_attributes
-
+from emalign.arrays.utils import resample
 
 def open_store(
     path: str,
