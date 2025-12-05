@@ -185,11 +185,11 @@ def _compute_flow(dataset,
             prev, z_prev = find_ref_slice(dataset, 
                                           z-1, 
                                           reverse=True)
-            prev = downsample(prev, scale)
+            prev = resample(prev, scale)
             pbar.set_description(f'Preparing previous slice ({z_prev})')
             if dataset_mask is not None:
                 prev_mask = dataset_mask[z_prev].read().result()
-                prev_mask = downsample(prev_mask, scale)
+                prev_mask = resample(prev_mask, scale)
             else:
                 prev_mask = compute_greyscale_mask(prev)
 
@@ -251,7 +251,7 @@ def _compute_flow(dataset,
         # If no mask exists, compute it
         if dataset_mask is not None:
             curr_mask = dataset_mask[z].read().result()
-            curr_mask = downsample(curr_mask, scale)
+            curr_mask = resample(curr_mask, scale)
         else:
             curr_mask = compute_greyscale_mask(curr)
         
@@ -364,8 +364,8 @@ def compute_flow_dataset(dataset,
     assert not np.isnan(flow).all()
 
     ds_transform = transform*np.array([[1,1,scale,scale], [1,1,scale,scale]])
-    ds_ref_slice = downsample(ref_slice, scale) if ref_slice is not None else ref_slice
-    ds_ref_slice_mask = downsample(ref_slice_mask, scale) if ref_slice_mask is not None else ref_slice_mask
+    ds_ref_slice = resample(ref_slice, scale) if ref_slice is not None else ref_slice
+    ds_ref_slice_mask = resample(ref_slice_mask, scale) if ref_slice_mask is not None else ref_slice_mask
     ds_flow, _ = _compute_flow(dataset=dataset,
                                original_shape=original_shape,
                                ignore_slices=ignore_slices,

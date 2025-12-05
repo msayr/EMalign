@@ -22,7 +22,7 @@ from emprocess.utils.mask import compute_greyscale_mask, mask_to_bbox
 
 from emalign.align_z.align_z import compute_flow_dataset, get_inv_map_mod
 from emalign.io.store import find_ref_slice, open_store
-from emalign.arrays.utils import downsample, pad_to_shape
+from emalign.arrays.utils import resample, pad_to_shape
 from emalign.io.progress import get_mongo_client, get_mongo_db, wipe_progress, check_progress, log_progress
 
 logging.basicConfig(level=logging.INFO)
@@ -87,14 +87,7 @@ def align_stack_z(destination_path,
     dataset_path = os.path.abspath(dataset_path)
     
     # Open input dataset
-    dataset = ts.open({'driver': 'zarr',
-                       'kvstore': {
-                             'driver': 'file',
-                             'path': dataset_path,
-                                  }
-                      },
-                      dtype=ts.uint8
-                      ).result()
+    dataset = open_store(dataset_path, mode='r', dtype=ts.uint8)
     
     # Keep within bounds
     original_shape = dataset.shape
@@ -102,15 +95,8 @@ def align_stack_z(destination_path,
         dataset = dataset[local_z_min: local_z_max]
 
     try:
-        dataset_mask = ts.open({'driver': 'zarr',
-                                'kvstore': {
-                                        'driver': 'file',
-                                        'path': os.path.abspath(dataset_path) + '_mask',
-                                            }
-                                },
-                                dtype=ts.bool
-                                ).result()
-        
+        dataset_mask = open_store(os.path.abspath(dataset_path) + '_mask', mode='r', dtype=ts.bool)
+
         dataset_mask = dataset_mask[dataset.domain]
     except ValueError as e:
         if 'NOT_FOUND' in str(e):
@@ -157,11 +143,11 @@ def align_stack_z(destination_path,
     else:
         # No need to compute flow because we only have one image and it is the first one
         data = dataset[dataset.domain.inclusive_min[0]].read().result() # First slice within bounds
-        data = downsample(data, target_scale)
+        data = resample(data, target_scale)
         
         if dataset_mask is not None:
             data_mask = dataset_mask[dataset_mask.domain.inclusive_min[0]].read().result()
-            data_mask = downsample(data_mask, target_scale)
+            data_mask = resample(data_mask, target_scale)
         else:
             data_mask = compute_greyscale_mask(data)
 
@@ -185,7 +171,8 @@ def align_stack_z(destination_path,
                                            destination_path=os.path.dirname(os.path.abspath(destination_path)),
                                            ref_slice=first_slice,
                                            ref_slice_mask=first_slice_mask,
-                                           target_scale=target_scale)
+                                           target_scale=target_scale,
+                                           z_offset=z_offset)
 
     #---------- Compute mesh ----------#
     # Elasticity ratio = k0/k (the larger the more deformation)
@@ -231,10 +218,10 @@ def align_stack_z(destination_path,
         first, z = find_ref_slice(dataset, 
                                   dataset.domain.inclusive_min[0], 
                                   reverse=False)
-        first = downsample(first, target_scale)
+        first = resample(first, target_scale)
         if dataset_mask is not None:
             first_mask = dataset_mask[z].read().result()
-            first_mask = downsample(first_mask, target_scale)
+            first_mask = resample(first_mask, target_scale)
         else:
             first_mask = compute_greyscale_mask(first)
 
@@ -257,7 +244,9 @@ def align_stack_z(destination_path,
     step_name = 'render_z'
     for z in tqdm(range(start, dataset.domain.exclusive_max[0]),
                     position=0,
-                    desc=f'{dataset_name}: Rendering aligned slices'):
+                    desc=f'{dataset_name}: Rendering aligned slices',
+                    dynamic_ncols=True,
+                    leave=True):
 
         if check_progress(db, dataset_name, step_name, z):
             skipped += 1 # Assume skipped slices are logged correctly
@@ -276,12 +265,12 @@ def align_stack_z(destination_path,
             continue
 
         # Resample if needed (target_scale != 1)
-        data = downsample(data, target_scale)
+        data = resample(data, target_scale)
 
         # Load or compute mask
         if dataset_mask is not None:
             data_mask = dataset_mask[z].read().result()
-            data_mask = downsample(data_mask, target_scale)
+            data_mask = resample(data_mask, target_scale)
         else:
             data_mask = compute_greyscale_mask(data)
 

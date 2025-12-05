@@ -1,7 +1,7 @@
 ''' Utilities for alignment of stacks along Z axis.'''
 
 import json
-from emalign.arrays.utils import downsample
+from emalign.arrays.utils import resample
 from emalign.io.store import find_ref_slice, open_store
 import networkx as nx
 import numpy as np
@@ -141,7 +141,7 @@ def compute_alignment_path(datasets,
         target_scale = resolution[-1]/target_resolution[-1]
 
         img = find_ref_slice(store, z, reverse=reverse)[0]
-        return downsample(img, target_scale)
+        return resample(img, target_scale)
     
     # Find all ranges over which there is overlap
     z_ranges = [np.arange(z[0], z[0] + ds.shape[0]) for z, ds in zip(z_offsets, datasets)]
@@ -198,7 +198,7 @@ def compute_alignment_path(datasets,
         raise RuntimeError(f'Some datasets are isolated: \n{x}')
 
     paths = extract_paths_from_root(G, root_node_idx)
-    reverse_z = [bool(z_offsets[p[0], 0] > z_offsets[p[0], 0]) for p in paths]
+    reverse_z = [bool(z_offsets[p[0], 0] > z_offsets[p[-1], 0]) for p in paths]
     paths = [[os.path.basename(os.path.abspath(datasets[i].kvstore.path)) for i in p] for p in paths]
 
     # Datasets will need to be bounded to not re-use fused images

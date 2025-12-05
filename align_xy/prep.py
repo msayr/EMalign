@@ -12,7 +12,7 @@ from emprocess.utils.io import get_dataset_attributes
 from emalign.io.store import find_ref_slice
 from ..arrays.sift import estimate_transform_sift
 from ..arrays.stacks import Stack
-from ..arrays.utils import downsample
+from ..arrays.utils import resample
 from ..visualize.nglancer import add_layers, start_nglancer_viewer
 from ..align_z.utils import get_ordered_datasets
 
@@ -204,8 +204,8 @@ def create_configs_fused_stacks(main_config_path,
             # Downsample if necessary
             yx_res = get_dataset_attributes(ds)['resolution'][-1]
             target_scale = yx_res/target_res
-            img, _ = find_ref_slice(ds, z - z_offsets[i][0]) # Could be better by accounting for gaps
-            images.append(downsample(img, target_scale))
+            img, _ = find_ref_slice(ds, z - z_offsets[i, 0]) # Could be better by accounting for gaps
+            images.append(resample(img, target_scale))
 
         # Test images and store valid matches
         G = nx.Graph()

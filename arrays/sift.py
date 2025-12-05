@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from emprocess.utils.img_proc import downsample
+from emalign.arrays.utils import resample
 
 
 def adjust_matrix_to_shape(mov_img, M):
@@ -194,9 +194,9 @@ def estimate_transform_sift(ref_img,
     Args:
         ref_img (np.ndarray): Reference greyscale image.
         mov_img (np.ndarray): Moving greyscale image.
-        scale (float, optional): Scale to downsample images to for computing the offset. Defaults to 1.
+        scale (float, optional): Scale to resample images to for computing the offset. Defaults to 1.
         refine_estimate (bool, optional): Whether to try again with higher resolution if the first estimate is found to be invalid. Defaults to True.
-        return_upscaled_matrix (bool, optional): Whether to return the matrix corresponding to the transformation to apply to the original image (as opposed to the downsampled one). Defaults to True.
+        return_upscaled_matrix (bool, optional): Whether to return the matrix corresponding to the transformation to apply to the original image (as opposed to the resampled one). Defaults to True.
         ref_mask (np.ndarray): Boolean mask for the regions to find keypoints in for the reference greyscale image. Defaults to None.
         mov_mask (np.ndarray): Boolean mask for the regions to find keypoints in for the the moving greyscale image. Defaults to None.
 
@@ -211,12 +211,12 @@ def estimate_transform_sift(ref_img,
     # knnMatch will return an error if there are too many keypoints so we limit their number
     max_features=250000
 
-    # Downsample images for faster computations
-    ds_ref_img = downsample(ref_img, scale)
-    ds_mov_img = downsample(mov_img, scale)
+    # resample images for faster computations
+    ds_ref_img = resample(ref_img, scale)
+    ds_mov_img = resample(mov_img, scale)
 
-    ds_ref_mask = downsample(ref_mask, scale).astype(np.uint8) if ref_mask is not None else None
-    ds_mov_mask = downsample(mov_mask, scale).astype(np.uint8) if ref_mask is not None else None
+    ds_ref_mask = resample(ref_mask, scale) if ref_mask is not None else None
+    ds_mov_mask = resample(mov_mask, scale) if mov_mask is not None else None
 
     # Find keypoints using SIFT
     sift = cv2.SIFT_create(nfeatures=max_features)

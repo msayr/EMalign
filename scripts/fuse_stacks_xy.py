@@ -13,7 +13,7 @@ from emprocess.utils.io import get_dataset_attributes, set_dataset_attributes
 from emprocess.utils.mask import compute_greyscale_mask
 
 from emalign.align_xy.prep import create_configs_fused_stacks
-from emalign.arrays.utils import _compute_laplacian_var, _compute_sobel_mean, _compute_grad_mag, downsample
+from emalign.arrays.utils import compute_laplacian_var, compute_sobel_mean, compute_grad_mag, resample
 
 
 # TODO: add a first slice test to make sure it is not missing images
@@ -199,8 +199,8 @@ def fuse_stacks_group(config,
                 mask = dataset_mask[z + zmin].read().result()
 
             # Resample to the correct resolution
-            img = downsample(img, target_scale)
-            mask = downsample(mask, target_scale)
+            img = resample(img, target_scale)
+            mask = resample(mask, target_scale)
             
             if canvas is None:
                 # First image

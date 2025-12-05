@@ -1,11 +1,44 @@
 import cv2
 import numpy as np
 
-def downsample(array, ratio):
+from emprocess.utils.mask import mask_to_bbox
+
+def resample(array, ratio):
+    '''
+    Resize an array by a scaling ratio using OpenCV interpolation.
+
+    Parameters:
+    -----------
+    array : np.ndarray
+        Input array to resize
+    ratio : float
+        Scaling factor. Values < 1 downsample, values > 1 upsample.
+        If 1, returns original array without change.
+
+    Returns:
+    --------
+    np.ndarray
+        Resized array
+
+    Raises:
+    -------
+    ValueError
+        If ratio is not positive
+
+    Notes:
+    ------
+    - Uses cv2.resize with default interpolation (bilinear)
+    - Boolean arrays are converted to uint8, resized, then converted back to bool
+    - Returns original array without copying if ratio == 1
+    '''
+    if ratio <= 0:
+        raise ValueError(f"Ratio must be positive, got {ratio}")
+
     if ratio == 1:
         return array
-    
+
     if array.dtype == bool:
+        # cv2.resize doesn't want boolean
         array = cv2.resize(array.astype(np.uint8), None, fx=ratio, fy=ratio).astype(bool)
     else:
         array = cv2.resize(array, None, fx=ratio, fy=ratio)
