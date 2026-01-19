@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 import sys
 
-from emalign.align_xy.tile_map_positions import estimate_tile_map_positions
 from emalign.align_xy.prep import find_offset_from_main_config, get_stacks, check_stacks_to_invert
 from emalign.io.volumescope import get_tilesets
 
@@ -45,9 +44,14 @@ def prep_align_stacks(main_dir,
     os.makedirs(config_dir, exist_ok=True)
     logging.info(f'Configs will be stored at: {project_dir}')
 
-    if os.path.exists(os.path.join(config_dir, 'main_config.json')):
-        logging.info('Config already exists in dir, exiting process...')
-        sys.exit()
+    main_config_path = os.path.join(config_dir, 'main_config.json')
+    if os.path.exists(main_config_path) and not force_overwrite:
+        response = input(f'Config already exists at {main_config_path}. Overwrite? [y/N] ')
+        if response.lower() != 'y':
+            logging.info('Exiting without overwriting existing config')
+            sys.exit(0)
+        else:
+            logging.info('Overwriting existing config')
 
     if prev_cfg is not None:
         offset[0] = find_offset_from_main_config(prev_cfg)
@@ -60,9 +64,10 @@ def prep_align_stacks(main_dir,
     logging.info(f'Found {len(stack_paths)} directories corresponding to resolution {resolution}: ')
     for s in stack_paths:
         logging.info(f'    {s}')
-        
+
     if not stack_paths:
-        sys.exit(f'No directory corresponding to the query was found at {main_dir}')
+        logging.error(f'No directory corresponding to the query was found at {main_dir}')
+        sys.exit(1)
 
     # Invert stack?
     logging.info('Please check whether to invert stacks')
@@ -119,7 +124,8 @@ def prep_align_stacks(main_dir,
         with open(config_path, 'w') as f:
             json.dump(config_stack, f, indent='')
 
-    project_name = input('Please name the project: ')
+    if project_name is None:
+        project_name = input('Please name the project: ')
 
     main_config = {
                 'project_name': project_name,
