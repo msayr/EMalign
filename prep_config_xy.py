@@ -37,7 +37,9 @@ def prep_align_stacks(main_dir,
                       apply_clahe,
                       prev_cfg,
                       num_workers,
-                      port):
+                      port,
+                      project_name=None,
+                      force_overwrite=False):
     
     config_dir = os.path.join(project_dir, 'config')
     os.makedirs(config_dir, exist_ok=True)
@@ -200,7 +202,7 @@ if __name__ == '__main__':
     parser.add_argument('--scale',
                         metavar='SCALE',
                         dest='scale',
-                        type=int,
+                        type=float,
                         default=0.5,
                         help='Downsampling scale to use for computing the elastic mesh. Lower values speed up the process but may fail. \
                               If a stack fails, it will temporarily use scale=1 (no downsampling). \
@@ -234,7 +236,18 @@ if __name__ == '__main__':
                         default=None,
                         type=str,
                         help='Path to the main_config of a previous part of the dataset. If provided, the z offset will be determined from the previous dataset.')
-    
+    parser.add_argument('--project-name',
+                        metavar='PROJECT_NAME',
+                        dest='project_name',
+                        default=None,
+                        type=str,
+                        help='Project name. If not provided, will prompt interactively.')
+    parser.add_argument('--force-overwrite',
+                        dest='force_overwrite',
+                        action='store_true',
+                        default=False,
+                        help='Force overwrite of existing config files without prompting.')
+
     args=parser.parse_args()
 
 
