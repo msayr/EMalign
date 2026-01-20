@@ -153,7 +153,7 @@ def load_configs_from_files(config_paths, destination_path, exclude):
             raise KeyError(f'Config file {config_paths[0]} missing required field "output_path"')
         destination_path = config['output_path']
 
-    output_configs_dir = os.path.join(os.path.dirname(os.path.abspath(destination_path)), '03_config_z')
+    output_configs_dir = os.path.join(os.path.dirname(os.path.abspath(destination_path)), 'config', 'z_config')
     destination_path = os.path.join(os.path.abspath(destination_path), project_name)
     create_configs = True
 

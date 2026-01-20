@@ -41,7 +41,7 @@ def prep_align_stacks(main_dir,
                       force_overwrite=False):
     
     # Make config dir
-    config_dir = os.path.join(project_dir, 'config')
+    config_dir = os.path.join(project_dir, 'config', 'xy_config')
     os.makedirs(config_dir, exist_ok=True)
     logging.info(f'Configs and outputs will be stored at: {project_dir}')
 
