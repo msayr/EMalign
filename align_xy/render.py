@@ -5,7 +5,7 @@ from sofima import warp
 from emprocess.utils.mask import mask_to_bbox
 
 from .utils import check_stitch
-from ..io.store import write_slice
+from ..io.store import write_data
 
 
 def render_slice_xy(destination,
@@ -71,9 +71,9 @@ def render_slice_xy(destination,
     if return_render:
         return stitched, stitch_score
     else:
-        destination, _ = write_slice(destination, stitched, z)
+        destination, _ = write_data(destination, stitched, z)
 
         if dest_mask is not None:
-            dest_mask, _ = write_slice(dest_mask, mask, z)
+            dest_mask, _ = write_data(dest_mask, mask, z)
             return destination, dest_mask, stitch_score
         return destination, stitch_score
