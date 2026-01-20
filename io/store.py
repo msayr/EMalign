@@ -237,8 +237,7 @@ def write_ndarray(
         dataset = dataset.resolve().result()
 
     # Handle offsets
-    xy_offset = xy_offset or []
-    if xy_offset and any(o < 0 for o in xy_offset):
+    if xy_offset is not None and any(o < 0 for o in xy_offset):
         raise ValueError(f'Offsets must be non-negative, got {xy_offset}')
 
     # Determine indexing based on array dimensionality
@@ -316,7 +315,6 @@ def write_ndarray_with_mask(
         Write entire array (mask=None, equivalent to write_ndarray):
         >>> ds, result = write_with_mask(dataset, img, z=5, offsets=[0, 0])
     '''
-    xy_offset = xy_offset or []
 
     # If no mask, just use write_ndarray
     if mask is None:
@@ -400,7 +398,7 @@ def write_data(
         raise ValueError('Downsample factor cannot be higher than 1 (upsampling).')
     elif downsample_factor < 1:
         arr = resample(arr, downsample_factor)
-        xy_offset *= downsample_factor
+        xy_offset = np.round(xy_offset * downsample_factor).astype(int)
 
         if preserve_mask is not None:
             preserve_mask = resample(preserve_mask, downsample_factor)
