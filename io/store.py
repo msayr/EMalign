@@ -96,21 +96,19 @@ def open_store(
         else:
             return None
 
+    # Spec for existing datasets
+    spec = {
+        'driver': 'zarr',
+        'kvstore': {'driver': 'file', 'path': path}
+    }
+
     # Mode: 'r' - Read only (must exist)
     if mode == 'r':
-        spec = {
-            'driver': 'zarr',
-            'kvstore': {'driver': 'file', 'path': path}
-        }
-        return ts.open(spec, dtype=dtype, read=True).result()
+        return ts.open(spec, read=True).result()
 
     # Mode: 'r+' - Read/write (must exist)
     if mode == 'r+':
-        spec = {
-            'driver': 'zarr',
-            'kvstore': {'driver': 'file', 'path': path}
-        }
-        return ts.open(spec, dtype=dtype).result()
+        return ts.open(spec).result()
 
     # Mode: 'w-' - Create (fail if exists)
     # Mode: 'w' - Create (overwrite if exists)
@@ -120,11 +118,7 @@ def open_store(
             raise IOError(f'Zarr store already exists at path: {path}')
         elif path_exists and mode == 'a':
             # Open existing store for read-write
-            spec = {
-                'driver': 'zarr',
-                'kvstore': {'driver': 'file', 'path': path}
-            }
-            return ts.open(spec, dtype=dtype).result()
+            return ts.open(spec).result()
 
         # Validate required parameters for creation
         if shape is None:
