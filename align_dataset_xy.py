@@ -9,7 +9,7 @@ os.environ['MKL_NUM_THREADS'] = '4'
 
 import warnings
 # Prevent printing the following warning, which does not seem to be an issue for the code to run properly:
-#     /home/autoseg/anaconda3/envs/alignment/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. 
+#     [...]python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. 
 #     os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="os.fork() was called")
 
@@ -35,7 +35,8 @@ def align_dataset_xy(config_path,
     '''Align and stitch in XY consecutive image stacks defined by a configuration file.
 
     Image stacks will be aligned one by one based on paths and parameters defined in a configuration file.
-    Stacks will be skipped if they already exist.
+    Stacks will be skipped if they already exist. 
+    If there are no images to align (i.e. only one tile in the stack), the image will just be written to zarr.
 
     Args:
         config_path (str): Absolute path to a JSON file containing the configuration.
