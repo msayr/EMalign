@@ -49,9 +49,11 @@ def _compute_flow(dataset,
     # Both transformations and flow are saved to file. They don't take much space but are slow to compute.
     scale_str = str(round(scale, 2)).replace('.', '_')
     ds_flow_path = os.path.join(destination_path,
+                                'z_intermediate',
                                 f'flow{scale_str}x',
                                 dataset_name)
     ds_trsf_path = os.path.join(destination_path,
+                                'z_intermediate',
                                 'transform',
                                 dataset_name)
     if os.path.exists(ds_flow_path):
@@ -405,7 +407,6 @@ def get_inv_map(flow, stride, dataset_name, mesh_config=None):
     solved = [np.zeros_like(flow[:, 0:1, ...])]
     ref = solved[-1]
     origin = jnp.array([0., 0.])
-    all_vmax = []
     for z in tqdm(range(0, flow.shape[1]),
                   desc=f'{dataset_name}: Relaxing mesh',
                   dynamic_ncols=True):
