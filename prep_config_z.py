@@ -1,3 +1,13 @@
+'''Prepare configuration files for Z alignment.
+
+Usage:
+    python -m emalign.prep_config_z \\
+        -p /path/to/project_dir \\
+        -cfg-z /path/to/z_config.json \\
+        -c 4 \\
+        --force-overwrite
+'''
+
 import argparse
 import json
 import logging
@@ -6,225 +16,337 @@ import os
 import sys
 
 from glob import glob
-from time import sleep
-from tqdm import tqdm
+from typing import List, Optional
 
-from emalign.align_z.align_z import align_arrays_z
-from emalign.align_z.utils import compute_datasets_offsets, get_ordered_datasets
+from emprocess.utils.io import get_dataset_attributes
+
+from emalign.align_z.config import add_config_metadata, validate_config_directory, CONFIG_VERSION
+from emalign.align_z.utils import compute_alignment_path, determine_initial_offset, get_ordered_datasets
 
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger('absl').setLevel(logging.WARNING)
 logging.getLogger('jax._src.xla_bridge').setLevel(logging.WARNING)
 
+# Constants
+PAD_OFFSET = np.array([1000, 1000])  # Offset to add to origin for drift correction
 
-def prep_config_z(config_paths,
-                  config_z_path,
-                  num_workers, 
-                  port):
+
+def load_configs_from_files(config_paths, exclude):
+    '''Load configuration from XY main config files.
+
+    Args:
+        config_paths: List of paths to main config files
+        exclude: List of patterns to exclude from datasets
+
+    Returns:
+        tuple: (datasets, z_offsets, yx_target_resolution,
+                project_name, mongodb_config_filepath, output_path)
+    '''
+    try:
+        with open(config_paths[0], 'r') as f:
+            config = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f'Invalid JSON in config file {config_paths[0]}: {e}')
+    except FileNotFoundError:
+        raise FileNotFoundError(f'Config file not found: {config_paths[0]}')
+
+    project_name = config.get('project_name')
+    if not project_name:
+        if 'output_path' not in config:
+            raise KeyError(f'Config file {config_paths[0]} missing both "project_name" and "output_path"')
+        project_name = os.path.basename(config['output_path']).rstrip('.zarr')
+    mongodb_config_filepath = config.get('mongodb_config_filepath')
+
+    if 'output_path' not in config:
+        raise KeyError(f'Config file {config_paths[0]} missing required field "output_path"')
+    output_path = config['output_path']
+
+    if 'resolution' not in config and 'yx_target_resolution' not in config:
+        raise KeyError(f'Config file {config_paths[0]} missing both "resolution" and "yx_target_resolution"')
+    yx_target_resolution = config['resolution'][0] if 'resolution' in config else config['yx_target_resolution'][0]
+
+    # Get list of datasets and offsets
+    try:
+        datasets, z_offsets = get_ordered_datasets(config_paths, exclude=exclude)
+    except Exception as e:
+        raise RuntimeError(f'Failed to load datasets from config files: {e}')
+
+    return (datasets, z_offsets, yx_target_resolution,
+            project_name, mongodb_config_filepath, output_path)
+
+
+def create_alignment_configs(datasets, z_offsets, output_configs_dir, config_z,
+                             destination_path, project_name, mongodb_config_filepath,
+                             yx_target_resolution, save_downsampled, num_workers):
+    '''Create alignment configuration files for all datasets.
+
+    Args:
+        datasets: List of tensorstore datasets
+        z_offsets: Array of z offsets for each dataset
+        output_configs_dir: Directory to store config files
+        config_z: Z alignment configuration dictionary
+        destination_path: Path to output zarr
+        project_name: Name of the project
+        mongodb_config_filepath: Path to MongoDB config
+        yx_target_resolution: Target resolution in YX
+        save_downsampled: Downsampling factor
+        num_workers: Number of worker threads
+
+    Returns:
+        tuple: (root_stack, paths, reverse_order, root_offset)
+    '''
+    logging.info('Creating Z align configuration files...')
+    logging.info(f'Configuration files will be stored at: \n    {output_configs_dir}\n')
+    logging.info('Computing alignment path...')
+
+    # Compute the paths. Some stacks may be disconnected in some parts of the dataset
+    root_stack, paths, reverse_order, ds_bounds = compute_alignment_path(
+        datasets, z_offsets, target_resolution=yx_target_resolution)
     
-    with open(config_z_path, 'r') as f:
-        config_z = json.load(f)
-    
-    stride          = config_z['stride']
-    patch_size      = config_z['patch_size']    
-    max_deviation   = config_z['max_deviation']
-    max_magnitude   = config_z['max_magnitude']  
-    scale_offset    = config_z['scale_offset']        
-    scale_flow      = config_z['scale_flow']    
-    step_slices     = config_z['step_slices']
-    filter_size     = config_z['mask_filter_size']    
-    range_limit     = config_z['mask_range_limit']
-    yx_target_resolution = config_z['yx_target_resolution']
-    k0      = config_z['k0'] 
-    k       = config_z['k'] 
-    gamma   = config_z['gamma']
+    # Determine where to start to ensure that everything fits within the canvas
+    logging.info('Computing padding...')
+    root_offset = determine_initial_offset(datasets, paths)
+    pad_offset = PAD_OFFSET.copy()  # pad offsets to correct for any drift
+    root_offset += pad_offset
 
-    dataset_paths = []
-    stack_configs_dir = []
-    for config_path in config_paths:
-        with open(config_path, 'r') as f:
-            main_config = json.load(f)
+    # Write alignment plan
+    align_plan = {
+        'root_stack': root_stack,
+        'paths': paths,
+        'reverse_order': reverse_order,
+        'root_offset': root_offset.tolist(),
+        'pad_offset': pad_offset.tolist(),
+        'yx_target_resolution': yx_target_resolution,
+        'dataset_local_bounds': ds_bounds,
+        'destination_path': destination_path,
+        'project_name': project_name
+    }
+    align_plan = add_config_metadata(align_plan)
 
-        project_name    = main_config['project_name']
-        output_path     = main_config['output_path']
-        stack_configs_dir.append(os.path.dirname(list(main_config['stack_configs'].values())[0]))
+    os.makedirs(output_configs_dir, exist_ok=True)
+    with open(os.path.join(output_configs_dir, '00_align_plan.json'), 'w') as f:
+        json.dump(align_plan, f, indent=2)
 
-        destination_path = os.path.join(output_path, project_name)
-        config_dir = os.path.join(os.path.dirname(output_path), 'config')
-        os.makedirs(config_dir, exist_ok=True)
-        
-        dataset_paths += [d for d in glob(os.path.join(output_path, '*/')) if os.path.basename(d[:-1]) != project_name]
-    datasets, z_offsets = get_ordered_datasets(dataset_paths, stack_configs_dir)
+    # Write configs for each dataset
+    done = []
+    for i, (path, order) in enumerate(zip(paths, reverse_order)):
+        for dataset_name in path:
+            if dataset_name in done:
+                continue
+            idx = [os.path.basename(os.path.abspath(d.kvstore.path)) == dataset_name for d in datasets].index(True)
+            dataset = datasets[idx]
+            z_offset = int(z_offsets[idx, 0]) + ds_bounds[dataset_name][0]
+            config_path = os.path.join(output_configs_dir, f'z_{dataset_name}.json')
 
-    existing_configs = glob(os.path.join(config_dir, 'z_*.json'))
-    if len(existing_configs) > 0:
-        logging.info('Config already exists in dir, exiting process...')
-        sys.exit()
-    
-    pad_offset = (500,500)
-    offsets = compute_datasets_offsets(datasets, 
-                                       z_offsets,
-                                       range_limit,
-                                       scale_offset, 
-                                       filter_size,
-                                       step_slices,
-                                       yx_target_resolution,
-                                       pad_offset,
-                                       num_workers)
-
-    reference = None
-    first_slice_z = None
-    aligned_slices = []
-    configs = []
-    for dataset, offset in tqdm(zip(datasets, offsets), desc='Aligning regions of transition'):
-        if reference is not None:
-            i = 0
-            curr = dataset[i].read().result()
-            while not curr.any():
-                i += 1
-                curr = dataset[i].read().result()
-            curr = np.pad(curr, np.stack([offset[1:], (0,0)]).T)
-            
-            unaligned, aligned = align_arrays_z(reference, curr, scale_flow,
-                                                patch_size, stride, max_magnitude, max_deviation,
-                                                filter_size, range_limit, 
-                                                k0, k, gamma,
-                                                num_workers)
-
-            aligned_slices.append([unaligned, aligned])
-
-        first_slice_z = None if reference is None else int(offset[0] + dataset.shape[0] - 1)
-        config = {'destination_path': destination_path,
-                  'dataset_path': dataset.kvstore.path, 
-                  'offset': offset.tolist(), 
-                  'scale': scale_flow, 
-                  'patch_size': patch_size, 
-                  'stride': stride, 
-                  'max_deviation': max_deviation,
-                  'max_magnitude': max_magnitude,
-                  'k0': k0,
-                  'k': k,
-                  'gamma': gamma,
-                  'filter_size': filter_size,
-                  'range_limit': range_limit,
-                  'first_slice': first_slice_z,
-                  'num_threads': num_workers}
-        
-        dataset_name = dataset.kvstore.path.split('/')[-2]
-        
-        config_path = os.path.abspath(os.path.join(config_dir, 'z_' + dataset_name + '.json'))
-        if reference is None:
-            with open(config_path, 'w') as f:
-                json.dump(config, f, indent='')
-        else:
-            configs.append((config_path, config))
-        
-        # Get the reference slice of the next dataset in line
-        reference = dataset[dataset.domain.exclusive_max[0] - 1].read().result()
-
-        i = 1
-        while not reference.any():
-            i += 1
-            reference = dataset[dataset.domain.exclusive_max[0] - i].read().result()
-
-        reference = np.pad(reference, np.stack([offset[1:], (0,0)]).T)
-
-    logging.info('Test alignment done, please check the result')
-    logging.info(' - z=0: Reference slice.')
-    logging.info(' - z=1: Moving slice.')
-
-    pbar = tqdm(enumerate(aligned_slices), position=0)
-    for i, data in pbar:
-        ref_dataset = datasets[i].kvstore.path.split('/')[-2]
-        moving_dataset = datasets[i+1].kvstore.path.split('/')[-2]
-        transition = f'{moving_dataset} to {ref_dataset}'
-        pbar.set_description(transition)
-
-        config_path, config = configs[i]
-        stride = config['stride']
-        patch_size = config['patch_size']
-        unaligned, aligned = data
-        while True:
-            answer = display_array(aligned, unaligned, transition, port)
-            if answer == 'y':
-                break
+            if dataset_name == path[0] and i == 0:
+                # Very first dataset to align should be root and has no reference
+                assert dataset_name == root_stack, f'First dataset ({dataset_name}) of the path is not the root stack ({root_stack})'
+                first_slice = None
+                xy_offset = list(map(int, root_offset))
             else:
-                print('\nProvide new values for alignment parameters (increase to increase deformation of the moving image)')
-                print('Stride should be patch_size//4 or patch_size//2')
-                patch_size = int(input(f'Patch size (current value = {patch_size}): '))
-                stride = int(input(f'Stride (current value = {stride}): '))
+                first_slice = z_offset - 1  # First slice is last slice from previous dataset
+                xy_offset = [0, 0]
 
-                logging.info('Computing alignment with the new values...')
-                reference, curr = unaligned
-                unaligned, aligned = align_arrays_z(reference, curr, scale_flow,
-                                                    patch_size, stride, max_magnitude, max_deviation,
-                                                    filter_size, range_limit, 
-                                                    k0, k, gamma,
-                                                    num_workers)
+            config = {
+                'destination_path': destination_path,
+                'dataset_path': os.path.abspath(dataset.kvstore.path),
+                'dataset_name': dataset_name,
+                'alignment_path': path,
+                'reverse_order': order,
+                'project_name': project_name,
+                'mongodb_config_filepath': mongodb_config_filepath,
+                'z_offset': z_offset,
+                'xy_offset': xy_offset,
+                'local_z_min': ds_bounds[dataset_name][0],
+                'local_z_max': ds_bounds[dataset_name][1],
+                'scale': config_z['scale_flow'],
+                'flow_config': config_z['flow'],
+                'mesh_config': config_z['mesh'],
+                'warp_config': config_z['warp'],
+                'first_slice': first_slice,
+                'yx_target_resolution': yx_target_resolution,
+                'save_downsampled': save_downsampled,
+                'num_workers': num_workers,
+                'overwrite': False
+            }
+            config = add_config_metadata(config)
 
-        config['stride'] = stride
-        config['patch_size'] = patch_size
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            done.append(dataset_name)
 
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent='')
+    logging.info(f'Configuration files were created at {output_configs_dir}')
 
-def display_array(aligned, unaligned, name, port):
-    import neuroglancer
-    neuroglancer.set_server_bind_address('0.0.0.0', bind_port=port)
-    dimensions = neuroglancer.CoordinateSpace(names=['x', 'y', 'z'], units='nm', scales=[50, 50, 50])
-    viewer = neuroglancer.Viewer()
-    with viewer.txn() as s:
-        s.dimensions = dimensions
-        s.position = np.append([0], np.array(aligned.shape[:1])//2)
-        s.layers[name + '_unaligned'] = neuroglancer.ImageLayer(source=neuroglancer.LocalVolume(unaligned.T, dimensions), cross_section_render_scale = 1)
-        s.layers[name + '_aligned'] = neuroglancer.ImageLayer(source=neuroglancer.LocalVolume(aligned.T, dimensions), cross_section_render_scale = 1)
-        s.layout = 'xy'
+    return root_stack, paths, reverse_order, root_offset
 
-    url = viewer.get_viewer_url()
-    print('\nhttp://localhost:' + url.split(f':')[-1])
-    
-    a = input('Is the Z alignment satisfying? (y/n) ')
-    sleep(1)
-    return a
-                
+
+def prep_config_z(project_dir: str,
+                  config_z_path: str,
+                  config_paths: List[str] = None,
+                  destination_path: Optional[str] = None,
+                  exclude: List[str] = None,
+                  num_workers: int = 1,
+                  save_downsampled: float = 10,
+                  force_overwrite: bool = False) -> str:
+    '''Generate Z alignment configuration files.
+
+    Args:
+        project_dir: Directory containing the project: config directory, and output zarr
+        config_z_path: Path to Z alignment parameters config
+        config_paths: List of paths to XY main config files (optional, derived from project_dir if not provided)
+        destination_path: Path to output zarr (optional, derived from config if not provided)
+        exclude: List of patterns to exclude from datasets
+        num_workers: Number of worker threads
+        save_downsampled: Downsampling factor for inspection store
+        force_overwrite: Whether to overwrite existing configs
+
+    Returns:
+        str: Path to the created config directory
+    '''
+    if exclude is None:
+        exclude = []
+
+    if config_paths is None:
+        # Attempt to find the config in the project directory
+        config_paths = [os.path.join(project_dir, 'config/xy_config/main_config.json')]
+        if not os.path.exists(config_paths[0]):
+            raise FileNotFoundError(f'Main config file not found in the project directory: {config_paths[0]}')
+        logging.info(f'Config file location was determined from project directory:\n{config_paths[0]}\n')
+
+    # Check if output directory already has configs
+    output_configs_dir = os.path.join(project_dir, 'config', 'z_config')
+    existing_configs = glob(os.path.join(output_configs_dir, 'z_*.json'))
+
+    if existing_configs and not force_overwrite:
+        response = input(f'Config files already exist at {output_configs_dir}.\nOverwrite? [y/N] ')
+        if response.lower() != 'y':
+            logging.info('Exiting without overwriting existing config')
+            sys.exit(0)
+        logging.info('Overwriting existing config files')
+
+    # Load Z alignment parameters
+    try:
+        with open(config_z_path, 'r') as f:
+            config_z = json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(f'Z alignment config file not found: {config_z_path}')
+    except json.JSONDecodeError as e:
+        raise ValueError(f'Invalid JSON in Z alignment config file {config_z_path}: {e}')
+
+    # Load datasets from XY configs
+    logging.info('Loading datasets from XY configuration files...')
+    (datasets, z_offsets, yx_target_resolution,
+     project_name, mongodb_config_filepath, xy_output_path) = load_configs_from_files(
+        config_paths, exclude)
+
+    # Determine destination path
+    if destination_path is None:
+        destination_path = os.path.join(os.path.abspath(xy_output_path), project_name)
+    else:
+        destination_path = os.path.join(os.path.abspath(destination_path), project_name)
+
+    # Print dataset info
+    logging.info('Datasets Z offsets:')
+    for dataset, z in zip(datasets, z_offsets):
+        yx_res = get_dataset_attributes(dataset)['resolution'][1:]
+        logging.info(f'    {z[0]} (res: {yx_res}): {os.path.basename(os.path.abspath(dataset.kvstore.path))}')
+
+    if isinstance(yx_target_resolution, list):
+        yx_target_resolution = np.min(yx_target_resolution, axis=0).tolist()
+
+    logging.info(f'Target resolution (yx): {yx_target_resolution}\n')
+    logging.info(f'Destination path: {destination_path}\n')
+
+    # Create configuration files
+    root_stack, paths, reverse_order, root_offset = create_alignment_configs(
+        datasets, z_offsets, output_configs_dir, config_z,
+        destination_path, project_name, mongodb_config_filepath,
+        yx_target_resolution, save_downsampled, num_workers
+    )
+
+    # Validate created configs
+    is_valid, errors, warnings = validate_config_directory(output_configs_dir)
+
+    if warnings:
+        for warning in warnings:
+            logging.warning(warning)
+
+    if not is_valid:
+        for error in errors:
+            logging.error(error)
+        raise RuntimeError('Created configuration files are invalid')
+
+    logging.info(f'Config version: {CONFIG_VERSION}')
+    logging.info(f'Root stack: {root_stack}')
+    logging.info(f'Number of alignment paths: {len(paths)}')
+    logging.info(f'\nConfiguration complete!')
+    logging.info(f'Config directory: {output_configs_dir}')
+    logging.info(f'\nTo run alignment:')
+    logging.info(f'  CUDA_VISIBLE_DEVICES=0,1 python -m emalign.align_dataset_z \\')
+    logging.info(f'    -p {project_dir} \\')
+    logging.info(f'    -c {num_workers}')
+
+    return output_configs_dir
+
+
 if __name__ == '__main__':
 
+    parser = argparse.ArgumentParser(description='Prepare configuration files for Z alignment.')
 
-    parser=argparse.ArgumentParser('Script aligning tiles in XY based on SOFIMA (Scalable Optical Flow-based Image Montaging and Alignment). \n\
-                                    This script was written to match the file structure produced by the ThermoFisher MAPs software.')
-    parser.add_argument('-cfg', '--config_path',
-                        metavar='CONFIG_PATH',
-                        dest='config_path',
+    # Required arguments
+    parser.add_argument('-p', '--project-dir',
+                        metavar='PROJECT_DIR',
+                        dest='project_dir',
                         required=True,
                         type=str,
-                        help='Path to the project config file.')
+                        help='Directory where the config will be written.')
     parser.add_argument('-cfg-z', '--config-z',
-                        metavar='CONFIG_Z',
+                        metavar='CONFIG_Z_PATH',
                         dest='config_z_path',
                         required=True,
                         type=str,
-                        help='Path to the config file containing the parameters relevant for z alignment.')
+                        help='Path to Z alignment parameters config')
+
+    # Optional arguments
+    parser.add_argument('-cfg', '--config',
+                        metavar='CONFIG_PATHS',
+                        dest='config_paths',
+                        nargs='+',
+                        type=str,
+                        default=None,
+                        help='Path(s) to XY main config file(s)')
+    parser.add_argument('-d', '--destination',
+                        metavar='DESTINATION',
+                        dest='destination_path',
+                        type=str,
+                        default=None,
+                        help='Path to output zarr (default: derived from XY config)')
+    parser.add_argument('--exclude',
+                        metavar='EXCLUDE',
+                        dest='exclude',
+                        type=str,
+                        nargs='+',
+                        default=[],
+                        help='Patterns to exclude from datasets')
     parser.add_argument('-c', '--cores',
                         metavar='CORES',
                         dest='num_workers',
                         type=int,
-                        default=None,
-                        help='Number of cores to use for multiprocessing and multithreading. Default: 0 (all cores available)')
-    parser.add_argument('--port',
-                        metavar='PORT',
-                        dest='port',
-                        type=int,
-                        default=33333,
-                        help='Port used by neuroglancer')
-    args=parser.parse_args()
+                        default=1,
+                        help='Number of threads to use. Default: 1')
+    parser.add_argument('-ds', '--downsample-scale',
+                        metavar='SCALE',
+                        dest='save_downsampled',
+                        type=float,
+                        default=10,
+                        help='Downsampling factor for inspection store. Default: 10')
+    parser.add_argument('--force-overwrite',
+                        dest='force_overwrite',
+                        action='store_true',
+                        default=False,
+                        help='Force overwrite of existing config files')
 
+    args = parser.parse_args()
 
-    try:
-        GPU_ids = os.environ['CUDA_VISIBLE_DEVICES']
-    except Exception:
-        print('To select GPUs, specify it before running python, e.g.: CUDA_VISIBLE_DEVICES=0,1 python script.py')
-        sys.exit()
-    print(f'Available GPU IDs: {GPU_ids}')
-
-    prep_config_z(**vars(args))    
+    prep_config_z(**vars(args))
