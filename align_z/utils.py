@@ -22,8 +22,6 @@ def get_ordered_datasets(config_paths, exclude=[]):
 
     Args:
         dataset_paths (list): List of paths to the datasets to open and order.
-        fused_config_dirs (list, optional): List of paths to the configuration directories containaining the fused stacks configs
-            Paths to these stacks will be ignored. Defaults to [].
         exclude (list, optional): List of strings to find in paths. If the string is found, the path will be ignored. 
 
     Returns:
@@ -51,19 +49,19 @@ def get_ordered_datasets(config_paths, exclude=[]):
                 main_config = json.load(f)
             
             # Get info from config
-            project_name    = main_config['project_name']
             output_path     = main_config['output_path']
             dataset_paths = glob(os.path.join(output_path, 'xy_intermediate', '*/'))
 
             for ds in dataset_paths:
                 check = [pattern in ds for pattern in exclude]
-                if np.any(check):
+                if any(check) or ds.endswith('_mask'):
+                    # Always exclude masks from query
                     continue
                 dataset = open_store(ds, mode='r')
                 z_shapes.append(dataset.shape[0])
 
                 offset = get_dataset_attributes(dataset)['voxel_offset']
-                offset[0] += previous_offset
+                offset[0] += previous_offset # Shift this dataset by the previous dataset's offset
                 group_offsets.append(offset)
                 offsets.append(offset)
                 dataset_stores.append(dataset)
@@ -80,6 +78,15 @@ def get_ordered_datasets(config_paths, exclude=[]):
 
 
 def extract_paths_from_root(G, root_node):
+    '''Produce alignment path(s) starting at the root dataset.
+
+    Args:
+        G (nx.Graph): Undirected graph where nodes are dataset indices and edges represent valid overlap between neighboring datasets.
+        root_node (int): Index of the root dataset, from which alignment will start.
+
+    Returns:
+        list: List of lists of int defining the order of alignment with dataset indices.
+    '''
     # Special nodes: degree != 2 (root, leaves, and branch points)
     special = [root_node] + list({n for n, d in G.degree() if d != 2 and n != root_node})
     paths = []
@@ -124,7 +131,7 @@ def extract_paths_from_root(G, root_node):
     return ordered_paths
 
 
-def compute_alignment_path(datasets, 
+def compute_alignment_path(datasets,
                            z_offsets,
                            target_resolution,
                            scale=0.2):
@@ -220,6 +227,7 @@ def compute_alignment_path(datasets,
                     G.add_edge(u,v, M=M, out_shape=out_shape, ref_offset=ref_offset, valid_estimate=valid_estimate)
 
     if not nx.is_connected(G):
+        # Some datasets are disconnected from the main alignment path
         x = [[os.path.basename(os.path.abspath(datasets[i].kvstore.path)) for i in cc] for cc in nx.connected_components(G)]
         raise RuntimeError(f'Some datasets are isolated: \n{x}')
 
@@ -237,7 +245,20 @@ def compute_alignment_path(datasets,
 
 
 def determine_initial_offset(datasets, paths):
+    '''Estimate cumulative XY offset needed to accommodate drift across alignment paths.
 
+    Traverses each alignment path, computing SIFT-based transforms between consecutive
+    datasets, and tracks the accumulated offset. Returns the maximum negative offset
+    encountered, which represents the padding needed at the origin.
+
+    Args:
+        datasets (list or dict): Either a list of tensorstore.TensorStore objects, or a
+            dict mapping dataset names to TensorStore objects.
+        paths (list): List of alignment paths (each path is a list of dataset names).
+
+    Returns:
+        np.ndarray: Array of shape (2,) with [y, x] offset to apply as padding at origin.
+    '''
     if not isinstance(datasets, dict):
         datasets = {os.path.basename(os.path.abspath(d.kvstore.path)): d for d in datasets}
     
