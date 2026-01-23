@@ -121,7 +121,7 @@ def get_stacks(stack_paths,
             for z in group_df.z:
                 tile_map[z] = group_df.loc[group_df.z == z, 'tile_paths'].item()[0]
             
-            stack = Stack()
+            stack = Stack(io_backend=io_backend)
             stack.stack_name = new_stack_name
             stack._set_tilemaps_paths(tile_map)
             if stack_names[0] not in invert_instructions:
