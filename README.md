@@ -4,20 +4,27 @@ A Python package for aligning Serial Block-face Electron Microscopy (SBEM) image
 
 ## Installation
 
+Clone the repository locally
 ```bash
-pip install -e .
+git clone https://github.com/Heinze-lab/EMalign.git
 ```
 
-### Dependencies
+Create a new environment and activate it (here using conda)
+```bash
+conda create -n myenv python=3.12
+conda activate myenv
+```
 
-Core dependencies:
-- numpy
-- tensorstore
-- JAX/XLA (for GPU acceleration)
-- OpenCV (cv2)
-- sofima
-- pymongo (progress tracking)
-- neuroglancer (visualization)
+Install JAX with CUDA support (recommended)
+```bash
+pip install jax[cuda12]   # Replace cuda12 with your version
+```
+
+Install dependencies
+```bash
+pip install -r requirements.txt
+pip install -e .
+```
 
 ## Quick Start
 
@@ -25,20 +32,19 @@ Core dependencies:
 
 **Prepare configuration**:
 ```bash
-python -m emalign.prep_config_xy \
-  -m /path/to/tiles \
+python prep_config_xy \
+  -i /path/to/tiles/directory \
   -p /path/to/project_dir \
-  -o output_name \
-  -res 8.0 \
+  -o /path/to/zarr.zarr \
+  -res 10 10 \
   -c 4
 ```
 
 **Execute alignment**:
 ```bash
-CUDA_VISIBLE_DEVICES=0 python -m emalign.align_dataset_xy \
+CUDA_VISIBLE_DEVICES=0 python align_dataset_xy \
   -cfg /path/to/main_config.json \
-  -c 4 \
-  --overwrite
+  -c 4
 ```
 
 ### 2. Z Alignment (Cross-Slice Alignment)
@@ -46,11 +52,9 @@ CUDA_VISIBLE_DEVICES=0 python -m emalign.align_dataset_xy \
 **Prepare configuration**:
 ```bash
 python -m emalign.prep_config_z \
-  -cfg /path/to/main_config.json \
+  -p /path/to/project_dir \
   -cfg-z /path/to/z_config.json \
-  -o /path/to/config/z_config/ \
-  -c 4 \
-  --exclude /flow _mask
+  -c 4
 ```
 
 **Execute alignment**:
@@ -70,44 +74,7 @@ python -m emalign.inspect_dataset /path/to/output.zarr
 
 ## Configuration
 
-### XY Main Configuration (`main_config.json`)
-
-```json
-{
-  "project_name": "my_project",
-  "main_dir": "/path/to/tiles",
-  "output_path": "/path/to/output.zarr",
-  "resolution": [8.0, 8.0],
-  "offset": [0, 0, 0],
-  "stride": 20,
-  "apply_gaussian": false,
-  "apply_clahe": false,
-  "stack_configs": {
-    "stack_name": "/path/to/stack_config.json"
-  },
-  "mongodb_config_filepath": null
-}
-```
-
-### Z Parameters Configuration (`config_z.json`)
-
-```json
-{
-  "scale_flow": 0.5,
-  "stride": 20,
-  "patch_size": [160, 160],
-  "max_deviation": 5,
-  "max_magnitude": 0,
-  "step_slices": 1,
-  "yx_target_resolution": [10, 10],
-  "k0": 0.01,
-  "k": 0.4,
-  "gamma": 0.5,
-  "flow": {},
-  "mesh": {},
-  "warp": {}
-}
-```
+Documentation about configuration files can be found [here](/docs/config.md).
 
 ## API Usage
 
