@@ -15,7 +15,7 @@ conda create -n myenv python=3.12
 conda activate myenv
 ```
 
-Install JAX with CUDA support (recommended)
+Install JAX with CUDA support to make use of GPU (recommended)
 ```bash
 pip install jax[cuda12]   # Replace cuda12 with your version
 ```
@@ -25,6 +25,14 @@ Install dependencies
 pip install -r requirements.txt
 pip install -e .
 ```
+
+_Installation was tested on Ubuntu 20.04 with Python 3.12._
+
+## Other requirements
+
+A MongoDB database is currently required for metadata and progress tracking. The free community edition is sufficient for this. It can be found [here](https://www.mongodb.com/products/self-managed/community-edition) along with installation tutorials.
+
+Neuroglancer is currently required for data visualization. Its installation may require extra steps described [here](https://github.com/google/neuroglancer?tab=readme-ov-file#building).
 
 ## Quick Start
 
@@ -51,7 +59,7 @@ CUDA_VISIBLE_DEVICES=0 python align_dataset_xy \
 
 **Prepare configuration**:
 ```bash
-python -m emalign.prep_config_z \
+python prep_config_z.py \
   -p /path/to/project_dir \
   -cfg-z /path/to/z_config.json \
   -c 4
@@ -59,7 +67,7 @@ python -m emalign.prep_config_z \
 
 **Execute alignment**:
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 python -m emalign.align_dataset_z \
+CUDA_VISIBLE_DEVICES=0,1 python align_dataset_z.py \
   -cfg /path/to/config/z_config/ \
   -cfg-z /path/to/z_config.json \
   -c 4 \
@@ -69,8 +77,10 @@ CUDA_VISIBLE_DEVICES=0,1 python -m emalign.align_dataset_z \
 ### 3. Inspect Results
 
 ```bash
-python -m emalign.inspect_dataset /path/to/output.zarr
+python inspect_dataset.py -d /path/to/output.zarr/dataset
 ```
+
+See [docs](/docs/visualization.md) for more details on how to use `inspect_dataset.py`.
 
 ## Configuration
 
