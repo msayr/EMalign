@@ -24,7 +24,10 @@ class Stack:
             self.stack_path = None
         
         if stack_path is not None and stack_name is None:
-            self.stack_name = stack_path.split('/')[-2]
+            if hasattr(self.io_backend, 'parse_stack_name'):
+                self.stack_name = self.io_backend.parse_stack_name(stack_path)
+            else:
+                self.stack_name = os.path.basename(os.path.normpath(stack_path))
         else:
             self.stack_name = stack_name
 
@@ -38,30 +41,37 @@ class Stack:
         return self.stack_name
 
     def _get_tilemaps_paths(self):
-        # Produces lists of paths of all tifs contained in self.stack_path
-        tile_paths = glob(os.path.join(self.stack_path, f'*{self.file_ext}'))
+        if hasattr(self.io_backend, 'build_slice_to_tilemap'):
+            self.slice_to_tilemap = self.io_backend.build_slice_to_tilemap(self.stack_path)
+            self.slices = sorted(list(self.slice_to_tilemap.keys()))
+            self.slice_to_paths = {k: list(v.values()) for k, v in self.slice_to_tilemap.items()}
+        else:
+            # Produces lists of paths of all tifs contained in self.stack_path
+            tile_paths = glob(os.path.join(self.stack_path, f'*{self.file_ext}'))
 
-        # Get paths and group by slice
-        self.slice_to_paths = defaultdict(list)
-        for tile_path in tile_paths:
-            self.slice_to_paths[self.io_backend.parse_slice_from_name(tile_path)].append(tile_path)
+            # Get paths and group by slice
+            self.slice_to_paths = defaultdict(list)
+            for tile_path in tile_paths:
+                self.slice_to_paths[self.io_backend.parse_slice_from_name(tile_path)].append(tile_path)
 
-        self.slices = sorted(list(self.slice_to_paths.keys()))
-        
-        # Sort
-        self.slice_to_paths = {k: self.slice_to_paths[k] for k in self.slices}
+            self.slices = sorted(list(self.slice_to_paths.keys()))
 
-        # Prep tilemaps
-        self.slice_to_tilemap = defaultdict(dict)
+            # Sort
+            self.slice_to_paths = {k: self.slice_to_paths[k] for k in self.slices}
+
+            # Prep tilemaps
+            self.slice_to_tilemap = defaultdict(dict)
+            for s in self.slices:
+                d = {}
+                for t in self.slice_to_paths[s]:
+                    d[self.io_backend.parse_yx_pos_from_name(t)] = t
+                self.slice_to_tilemap.update({s: d})
+
         tile_indices = set()
-        for s in self.slices:
-            d = {}
-            for t in self.slice_to_paths[s]:
-                tile_indices.add(self.io_backend.parse_yx_pos_from_name(t))
-                d.update({self.io_backend.parse_yx_pos_from_name(t): t for t in self.slice_to_paths[s]})
-            self.slice_to_tilemap.update({s: d})   
+        for d in self.slice_to_tilemap.values():
+            tile_indices.update(d.keys())
 
-        self.tile_maps_invert = dict(zip(tile_indices, [None]*len(tile_indices)))
+        self.tile_maps_invert = dict(zip(tile_indices, [None] * len(tile_indices)))
         
     def _set_tilemaps_paths(self, tile_map_paths):
 

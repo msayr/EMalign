@@ -80,7 +80,7 @@ def prep_align_stacks(main_dir,
 
     # Invert stack?
     logging.info('Please check whether to invert stacks')
-    invert_instructions = check_stacks_to_invert(stack_paths, num_workers, bind_port=port)
+    invert_instructions = check_stacks_to_invert(stack_paths, num_workers, io_backend=io_backend, bind_port=port)
 
     stacks = get_stacks(stack_paths, invert_instructions, io_backend=io_backend)
 

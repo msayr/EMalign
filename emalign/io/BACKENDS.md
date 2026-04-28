@@ -68,6 +68,7 @@ Add your backend to `emalign/io/backend.py`:
 ```python
 _BACKENDS = {
     'volumescope': 'emalign.io.volumescope',
+    'sbem_image': 'emalign.io.sbem_image',
     'my_microscope': 'emalign.io.my_microscope',  # Add this line
 }
 ```
