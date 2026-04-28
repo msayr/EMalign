@@ -47,13 +47,19 @@ def estimate_tiles_overlap(img1,
         crop_img2 = img2[:, :overlap_search]
 
     # First, try increasing only compute scale
-    M, _, _, valid_estimate, _ = estimate_transform_sift(crop_img1, crop_img2, scale, refine_estimate=True, return_raw_homology=True)
-    offset = M[:, 2]
+    M, _, _, valid_estimate, _ = estimate_transform_sift(
+        crop_img1,
+        crop_img2,
+        scale,
+        refine_estimate=True,
+        return_raw_homology=True,
+    )
 
-    if valid_estimate:
-        return overlap_search - np.abs(offset[::-1][axis])
-    else:
+    if not valid_estimate or M is None:
         return 0
+
+    offset = M[:, 2]
+    return overlap_search - np.abs(offset[::-1][axis])
 
 
 def estimate_tilemap_overlap(tile_map,
