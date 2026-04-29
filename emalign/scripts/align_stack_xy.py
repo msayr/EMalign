@@ -159,7 +159,8 @@ def align_stack_xy(output_path,
             # Some SOFIMA versions can raise shape-mismatch IndexError for
             # specific overlap candidates (e.g. sparse 1xN/Nx1 grids), so try
             # progressively larger candidates and keep the first valid one.
-            overlap_candidates, max_overlap = _build_overlap_candidates(overlap, tile_map)
+            overlap_pad = 80
+            overlap_candidates = [overlap, overlap + overlap_pad]
             coarse_error = None
             coarse_error_details = []
             tile_debug = _format_tile_debug(tile_map, tm.tile_space)
