@@ -40,6 +40,27 @@ def get_tilesets(main_dir, resolution, dir_pattern, num_workers):
     return selected
 
 
+def build_slice_to_tilemap(stack_path):
+    """Build {slice: {(y, x): path}} for manual directory layouts.
+
+    Expected structure:
+      <stack>/tiles/t<set>_<x>_<y>/*_s00000.tif
+    """
+    tile_paths = glob(os.path.join(stack_path, 'tiles', 't*_??_??', f'*{FILE_EXT}'))
+    if not tile_paths:
+        return {}
+
+    slice_to_tilemap = {}
+    for tile_path in sorted(tile_paths):
+        z = parse_slice_from_name(tile_path)
+        yx = parse_yx_pos_from_name(tile_path)
+        if z not in slice_to_tilemap:
+            slice_to_tilemap[z] = {}
+        slice_to_tilemap[z][yx] = tile_path
+
+    return slice_to_tilemap
+
+
 def parse_yx_pos_from_name(n):
     """Parse (y, x) grid index from parent directory name.
 
