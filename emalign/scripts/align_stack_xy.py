@@ -14,6 +14,7 @@ warnings.filterwarnings('ignore', category=RuntimeWarning, message='os.fork() wa
 
 import json
 import logging
+import traceback
 import numpy as np
 import tensorstore as ts
 import argparse
@@ -32,6 +33,17 @@ from emalign.io.backend import get_io_backend
 logging.basicConfig(level=logging.INFO)
 logging.getLogger('absl').setLevel(logging.WARNING)
 logging.getLogger('jax._src.xla_bridge').setLevel(logging.WARNING)
+
+
+def _format_tile_debug(tile_map, tile_space):
+    keys = sorted(tile_map.keys())
+    tile_shapes = {str(k): tuple(int(v) for v in tile_map[k].shape) for k in keys}
+    return {
+        'tile_count': len(keys),
+        'tile_keys': [str(k) for k in keys],
+        'tile_shapes': tile_shapes,
+        'tile_space': list(map(int, tile_space)) if tile_space is not None else None,
+    }
 
 
 def align_stack_xy(output_path,
@@ -150,6 +162,8 @@ def align_stack_xy(output_path,
             overlap_pad = 80
             overlap_candidates = [overlap, overlap + overlap_pad]
             coarse_error = None
+            coarse_error_details = []
+            tile_debug = _format_tile_debug(tile_map, tm.tile_space)
             for overlap_candidate in overlap_candidates:
                 try:
                     cx, cy, coarse_mesh = get_coarse_offset(
@@ -158,16 +172,49 @@ def align_stack_xy(output_path,
                         overlap=overlap_candidate,
                     )
                     break
-                except IndexError as exc:
+                except Exception as exc:
                     coarse_error = exc
+                    detail = {
+                        'overlap': int(overlap_candidate),
+                        'error_type': type(exc).__name__,
+                        'error_message': str(exc),
+                        'traceback': traceback.format_exc(),
+                    }
+                    coarse_error_details.append(detail)
                     logging.warning(
                         f"{stack.stack_name}: coarse offset failed with overlap="
-                        f"{overlap_candidate} at z={z} ({exc}). Retrying with a larger overlap."
+                        f"{overlap_candidate} at z={z} ({type(exc).__name__}: {exc}). Retrying with a larger overlap."
+                    )
+                    logging.warning(
+                        "%s: coarse offset diagnostics at z=%s: %s",
+                        stack.stack_name,
+                        z,
+                        json.dumps({
+                            'stack': stack.stack_name,
+                            'z': int(z),
+                            'overlap_candidate': int(overlap_candidate),
+                            'estimated_overlap': int(overlap),
+                            'tile_debug': tile_debug,
+                        }, indent=2)
                     )
             else:
+                diagnostics = {
+                    'stack': stack.stack_name,
+                    'z': int(z),
+                    'overlap_candidates': [int(o) for o in overlap_candidates],
+                    'estimated_overlap': int(overlap),
+                    'tile_debug': tile_debug,
+                    'errors': coarse_error_details,
+                }
+                logging.error(
+                    "%s: failed to compute coarse offsets at z=%s. Full diagnostics:\n%s",
+                    stack.stack_name,
+                    z,
+                    json.dumps(diagnostics, indent=2),
+                )
                 raise RuntimeError(
                     f"Failed to compute coarse offsets for {stack.stack_name} at z={z} "
-                    f"with overlap candidates {overlap_candidates}."
+                    f"with overlap candidates {overlap_candidates}. See logs for full diagnostics."
                 ) from coarse_error
 
             if overlap > 160:
