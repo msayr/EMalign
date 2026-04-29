@@ -41,7 +41,7 @@ def get_tilesets(main_dir, resolution, dir_pattern, num_workers):
 
 
 def build_slice_to_tilemap(stack_path):
-    """Build {slice: {(y, x): path}} for manual directory layouts.
+    """Build {slice: {(x, y): path}} for manual directory layouts.
 
     Expected structure:
       <stack>/tiles/t<set>_<x>_<y>/*_s00000.tif
@@ -62,7 +62,7 @@ def build_slice_to_tilemap(stack_path):
 
 
 def parse_yx_pos_from_name(n):
-    """Parse (y, x) grid index from parent directory name.
+    """Parse (x, y) grid index from parent directory name.
 
     Expected directory form: .../tiles/t<set>_<x>_<y>/<file>.tif
     """
@@ -73,7 +73,7 @@ def parse_yx_pos_from_name(n):
 
     x_pos = int(m.group(1))
     y_pos = int(m.group(2))
-    return (y_pos, x_pos)
+    return (x_pos, y_pos)
 
 
 def parse_slice_from_name(n):

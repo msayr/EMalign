@@ -118,7 +118,7 @@ def get_tilesets(main_dir, resolution, dir_pattern, num_workers):
 
 def parse_yx_pos_from_name(n):
     '''
-    Extract tile grid position (y, x) from a tile filename.
+    Extract tile grid position (x, y) from a tile filename.
 
     For VolumeScope/MAPs, filenames follow the pattern: Tile_XX-YY_sZZZZ.tif
     where XX is the x-position and YY is the y-position (1-indexed).
@@ -127,17 +127,17 @@ def parse_yx_pos_from_name(n):
         n: Tile filename or full path (e.g., 'Tile_03-02_s0001.tif')
 
     Returns:
-        Tuple (y, x) as 0-indexed integers representing the tile's position
-        in the grid. Example: 'Tile_03-02_s0001.tif' -> (1, 2)
+        Tuple (x, y) as 0-indexed integers representing the tile's position
+        in the grid. Example: 'Tile_03-02_s0001.tif' -> (2, 1)
 
     Notes for implementing other backends:
-        - Must return a tuple of (y, x) as 0-indexed integers
+        - Must return a tuple of (x, y) as 0-indexed integers
         - The tuple is used as a dictionary key to identify tiles
         - All tiles in a slice should have unique (y, x) positions
         - Convention: (0, 0) is top-left of the tile grid
     '''
     xy_pos = n.split('Tile_')[-1][:7]
-    return tuple(int(i)-1 for i in xy_pos.split('-'))[::-1]
+    return tuple(int(i)-1 for i in xy_pos.split('-'))
 
 
 def parse_slice_from_name(n):
