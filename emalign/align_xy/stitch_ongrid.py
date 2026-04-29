@@ -16,10 +16,15 @@ def get_coarse_offset(tile_map,
     Compute coarse offset and mesh for initial rigid XY alignment
     '''
     
+    if np.isscalar(overlap):
+        overlap_values = (int(overlap),)
+    else:
+        overlap_values = tuple(int(o) for o in overlap)
+
     # Coarse rigid offset between tiles
     cx, cy = stitch_rigid.compute_coarse_offsets(tile_space, 
                                                  tile_map, 
-                                                 overlaps_xy=((overlap),(overlap)),
+                                                 overlaps_xy=(overlap_values, overlap_values),
                                                  min_range=min_range,
                                                  min_overlap=min_overlap,
                                                  filter_size=filter_size)
