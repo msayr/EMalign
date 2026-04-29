@@ -17,14 +17,20 @@ def get_coarse_offset(tile_map,
     '''
     
     if np.isscalar(overlap):
-        overlap_values = (int(overlap),)
+        overlap_xy = (int(overlap), int(overlap))
     else:
         overlap_values = tuple(int(o) for o in overlap)
+        if len(overlap_values) == 1:
+            overlap_xy = (overlap_values[0], overlap_values[0])
+        elif len(overlap_values) >= 2:
+            overlap_xy = (overlap_values[0], overlap_values[1])
+        else:
+            raise ValueError('overlap must contain at least one value')
 
     # Coarse rigid offset between tiles
     cx, cy = stitch_rigid.compute_coarse_offsets(tile_space, 
                                                  tile_map, 
-                                                 overlaps_xy=(overlap_values, overlap_values),
+                                                 overlaps_xy=overlap_xy,
                                                  min_range=min_range,
                                                  min_overlap=min_overlap,
                                                  filter_size=filter_size)
