@@ -3,6 +3,7 @@ import importlib
 _BACKENDS = {
     'volumescope': 'emalign.io.volumescope',
     'sbem_image': 'emalign.io.sbem_image',
+    'manual': 'emalign.io.manual',
 }
 
 def get_io_backend(mode):
