@@ -46,28 +46,6 @@ def _format_tile_debug(tile_map, tile_space):
     }
 
 
-
-
-def _build_overlap_candidates(estimated_overlap, tile_map):
-    """Generate increasingly permissive overlap candidates.
-
-    Tries small increments first, then larger ones up to 50% of the
-    smallest tile dimension to support manual layouts with large overlaps.
-    """
-    min_tile_dim = min(int(min(arr.shape)) for arr in tile_map.values())
-    max_overlap = max(1, int(min_tile_dim * 0.5))
-    base = max(1, int(estimated_overlap))
-
-    increments = (0, 80, 160, 240, 320, 400, 520, 640)
-    candidates = []
-    for inc in increments:
-        cand = min(max_overlap, base + inc)
-        if cand not in candidates:
-            candidates.append(cand)
-    if max_overlap not in candidates:
-        candidates.append(max_overlap)
-    return candidates, max_overlap
-
 def align_stack_xy(output_path,
                    stack_name,
                    tile_maps_paths,
@@ -215,7 +193,6 @@ def align_stack_xy(output_path,
                             'z': int(z),
                             'overlap_candidate': int(overlap_candidate),
                             'estimated_overlap': int(overlap),
-                            'max_overlap_candidate': int(max_overlap),
                             'tile_debug': tile_debug,
                         }, indent=2)
                     )
@@ -225,7 +202,6 @@ def align_stack_xy(output_path,
                     'z': int(z),
                     'overlap_candidates': [int(o) for o in overlap_candidates],
                     'estimated_overlap': int(overlap),
-                    'max_overlap_candidate': int(max_overlap),
                     'tile_debug': tile_debug,
                     'errors': coarse_error_details,
                 }
