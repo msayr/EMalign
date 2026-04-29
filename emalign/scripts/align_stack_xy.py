@@ -143,13 +143,32 @@ def align_stack_xy(output_path,
                 raise RuntimeError('No overlap found between tiles for this slice.')
 
             pbar.set_description(f'{stack.stack_name}: Computing elastic meshes...')
-            # Compute overlap for better coarse mesh estimation
+            # Compute overlap for better coarse mesh estimation.
+            # Some SOFIMA versions can raise shape-mismatch IndexError for
+            # specific overlap candidates (e.g. sparse 1xN/Nx1 grids), so try
+            # progressively larger candidates and keep the first valid one.
             overlap_pad = 80
-            cx, cy, coarse_mesh = get_coarse_offset(tile_map, 
-                                                    tm.tile_space,
-                                                    overlap=[overlap,               # try first
-                                                             overlap+overlap_pad]   # try second
-                                                   )
+            overlap_candidates = [overlap, overlap + overlap_pad]
+            coarse_error = None
+            for overlap_candidate in overlap_candidates:
+                try:
+                    cx, cy, coarse_mesh = get_coarse_offset(
+                        tile_map,
+                        tm.tile_space,
+                        overlap=overlap_candidate,
+                    )
+                    break
+                except IndexError as exc:
+                    coarse_error = exc
+                    logging.warning(
+                        f"{stack.stack_name}: coarse offset failed with overlap="
+                        f"{overlap_candidate} at z={z} ({exc}). Retrying with a larger overlap."
+                    )
+            else:
+                raise RuntimeError(
+                    f"Failed to compute coarse offsets for {stack.stack_name} at z={z} "
+                    f"with overlap candidates {overlap_candidates}."
+                ) from coarse_error
 
             if overlap > 160:
                 # Generally good parameters
