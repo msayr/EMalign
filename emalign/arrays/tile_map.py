@@ -73,8 +73,10 @@ def estimate_tilemap_overlap(tile_map,
     overlaps_x = []
     for x in range(0, tile_space[1] - 1):
         for y in range(0, tile_space[0]):
-            left = tile_map[(x,y)] 
-            right = tile_map[(x+1,y)] 
+            left = tile_map.get((x, y))
+            right = tile_map.get((x + 1, y))
+            if left is None or right is None:
+                continue
 
             overlap = estimate_tiles_overlap(left, 
                                              right, 
@@ -85,15 +87,21 @@ def estimate_tilemap_overlap(tile_map,
     overlaps_y = []
     for y in range(0, tile_space[0] - 1):
         for x in range(0, tile_space[1]):
-            bot = tile_map[(x,y)] 
-            top = tile_map[(x,y+1)] 
+            bot = tile_map.get((x, y))
+            top = tile_map.get((x, y + 1))
+            if bot is None or top is None:
+                continue
             
             overlap = estimate_tiles_overlap(bot, 
                                              top, 
                                              axis=0, 
                                              scale=scale)
             overlaps_y.append(overlap)
-    return int(np.max(overlaps_x + overlaps_y))
+
+    overlaps = overlaps_x + overlaps_y
+    if not overlaps:
+        return 0
+    return int(np.max(overlaps))
 
 
 class TileMap:
