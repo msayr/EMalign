@@ -48,6 +48,28 @@ def read_data(
     
     return data
 
+def resolve_dataset_path(dataset_path, mode=None):
+    """Resolve a user-provided path to a readable zarr dataset or dataset directory."""
+    dataset_path = os.path.abspath(dataset_path)
+
+    # If a direct dataset path is provided, use it as-is.
+    if os.path.exists(os.path.join(dataset_path, '.zarray')):
+        return dataset_path, mode
+
+    # If container root is provided after XY alignment, default to xy_intermediate in all_ds mode.
+    xy_intermediate = os.path.join(dataset_path, 'xy_intermediate')
+    if os.path.isdir(xy_intermediate):
+        if mode is None:
+            mode = 'all_ds'
+        return xy_intermediate, mode
+
+    # If container root is provided after Z alignment, use final dataset.
+    z_dataset = os.path.join(dataset_path, 'dataset')
+    if os.path.exists(os.path.join(z_dataset, '.zarray')):
+        return z_dataset, mode
+
+    return dataset_path, mode
+
 
 def inspect_dataset(
             dataset_path,
@@ -74,6 +96,7 @@ def inspect_dataset(
             all_ds: Reads data within data_range from all the datasets found in the provided store.
         bind_port (int, optional): Port to bind the neuroglancer viewer to. Defaults to 55555.
     '''
+    dataset_path, mode = resolve_dataset_path(dataset_path, mode=mode)
   
     if print_shape:
         dataset = open_store(dataset_path, mode='r', dtype=ts.uint8)
@@ -173,7 +196,8 @@ if __name__ == '__main__':
                         required=True,
                         type=str,
                         default=None,
-                        help='Path to the zarr container containing the final alignment.')
+                        help='Path to a zarr dataset or container. If a container is provided,'\
+                        'the script auto-detects dataset or xy_intermediate.')
     parser.add_argument('--bbox',
                         metavar='DATA_RANGE',
                         dest='bounding_box',
@@ -216,3 +240,4 @@ if __name__ == '__main__':
     args=parser.parse_args()
 
     inspect_dataset(**vars(args))
+
