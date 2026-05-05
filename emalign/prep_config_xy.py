@@ -201,7 +201,7 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--output_name',
                         metavar='OUT_NAME',
                         dest='output_name',
-                        required=True,
+                        default=None,
                         type=str,
                         help='Name for the zarr container that will contain stitched files. Will be written in project_dir. Default: same as project_dir name')
     parser.add_argument('--offset',
