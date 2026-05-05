@@ -175,7 +175,7 @@ if __name__ == '__main__':
                         required=True,
                         type=str,
                         default=None,
-                        help='Path to the zarr container containing the final alignment.')
+                        help='Path to a dataset inside a zarr container.')
     parser.add_argument('--bbox',
                         metavar='DATA_RANGE',
                         dest='bounding_box',
