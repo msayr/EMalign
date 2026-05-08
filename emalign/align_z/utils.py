@@ -3,6 +3,7 @@
 import json
 from emalign.arrays.utils import resample
 from emalign.io.store import find_ref_slice, open_store
+import logging
 import networkx as nx
 import numpy as np
 import os
@@ -227,10 +228,12 @@ def compute_alignment_path(datasets,
         next_group = grouped.get_group(g+1)
         for u in curr_group.ds_indices.iloc[0]:
             for v in next_group.ds_indices.iloc[0]:
+                if u == v:
+                    continue  # same dataset spans both groups — no inter-dataset transition needed
                 # Check for match at the boundary of the relevant range
                 ref = _get_slice(datasets_nomask[u], curr_group.z.max() - z_offsets[u, 0], reverse=True)
                 mov = _get_slice(datasets_nomask[v], next_group.z.min() - z_offsets[v, 0], reverse=False)
-                M, out_shape, ref_offset, valid_estimate, _ = estimate_transform_sift(ref.copy(), mov.copy(), 
+                M, out_shape, ref_offset, valid_estimate, _ = estimate_transform_sift(ref.copy(), mov.copy(),
                                                                                       scale=scale, refine_estimate=True)
 
                 if valid_estimate:
@@ -243,6 +246,13 @@ def compute_alignment_path(datasets,
         raise RuntimeError(f'Some datasets are isolated: \n{x}')
 
     paths = extract_paths_from_root(G, root_node_idx)
+    if not paths:
+        # Root is the only effective dataset after graph construction (e.g. all others were
+        # filtered as fused sub-datasets).  Treat it as a single-stack project.
+        logging.warning(f'No alignment paths found from root "{root_node}"; treating it as the sole dataset.')
+        ds_bounds = {root_node: (0, datasets_nomask[root_node_idx].shape[0])}
+        return root_node, [[root_node]], [False], ds_bounds
+
     reverse_z = [bool(z_offsets[p[0], 0] > z_offsets[p[-1], 0]) for p in paths]
     paths = [[os.path.basename(os.path.abspath(datasets_nomask[i].kvstore.path)) for i in p] for p in paths]
 
