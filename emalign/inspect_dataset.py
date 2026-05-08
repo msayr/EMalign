@@ -45,18 +45,37 @@ def read_data(
 
     if not keep_missing:
         data = data[data.any(axis=(1,2))]
-
-        if not data.any():
-            raise RuntimeError(f'No data found at {dataset_path}')
     
     return data
+
+def resolve_dataset_path(dataset_path, mode=None):
+    """Resolve a user-provided path to a readable zarr dataset or dataset directory."""
+    dataset_path = os.path.abspath(dataset_path)
+
+    # If a direct dataset path is provided, use it as-is.
+    if os.path.exists(os.path.join(dataset_path, '.zarray')):
+        return dataset_path, mode
+
+    # If container root is provided after XY alignment, default to xy_intermediate in all_ds mode.
+    xy_intermediate = os.path.join(dataset_path, 'xy_intermediate')
+    if os.path.isdir(xy_intermediate):
+        if mode is None:
+            mode = 'all_ds'
+        return xy_intermediate, mode
+
+    # If container root is provided after Z alignment, use final dataset.
+    z_dataset = os.path.join(dataset_path, 'dataset')
+    if os.path.exists(os.path.join(z_dataset, '.zarray')):
+        return z_dataset, mode
+
+    return dataset_path, mode
 
 
 def inspect_dataset(
             dataset_path,
             bounding_box=None,
             keep_missing=False,
-            project_dir=None,
+            project_configs=[],
             mode=None,
             bind_port=55555,
             print_shape=False):
@@ -70,13 +89,14 @@ def inspect_dataset(
         data_range (list of `int`, optional): Range of z indices to read data from: [inclusive_min, exclusive_max]
             If only one is int given, it will be considered the start and the end will be the last possible index. Defaults to [0].
         keep_missing (bool, optional): Whether to skip fully black images. Defaults to False.
-        project_dir (`str`, optional): Path to the project directory where configuration files should be written in project_dir/config. Defaults to None.
+        project_configs (list of `str`, optional): List of absolute paths to configuration files containing information about datasets to display, when mode=z_transitions. Defaults to [].
         mode (str, optional): Mode to use to display data. If no mode is given, will simply read data from the path provided.
             One of: `None`, z_transitions, all_ds. Defaults to None.
             z_transitions: Determines from project_configs all the z indices where a transition occurred (i.e. two stacks were aligned) and show images around transitions.
             all_ds: Reads data within data_range from all the datasets found in the provided store.
         bind_port (int, optional): Port to bind the neuroglancer viewer to. Defaults to 55555.
     '''
+    dataset_path, mode = resolve_dataset_path(dataset_path, mode=mode)
   
     if print_shape:
         dataset = open_store(dataset_path, mode='r', dtype=ts.uint8)
@@ -111,57 +131,58 @@ def inspect_dataset(
                    voxel_offsets=[voxel_offset],
                    names=[dataset_name])
     elif mode == 'z_transitions':
-        if project_dir is None:
-            raise ValueError('Specifying project directory (flag: -p) is required with mode "z_transitions".')
         dataset_paths = []
-        config_paths = glob(os.path.join(project_dir, 'config/xy_config/main_config.json'))
-        _, z_offsets = get_ordered_datasets(config_paths)
+        config_paths = glob(os.path.join(project_configs, '*.json'))
+
+        for config_path in config_paths:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            dataset_paths.append(os.path.join(config['dataset_path']))
+
+        _, z_offsets = get_ordered_datasets(dataset_paths)
 
         window = 20
-        visible = True
         for z, _, _ in z_offsets:
             data_range = [int(z - max(1, window/2)), int(z + max(1, window/2))]
 
             try:
-                d = read_data(dataset_path, bounding_box=data_range, keep_missing=keep_missing)
+                d = read_data(dataset_path, bounding_box=bounding_box, keep_missing=keep_missing)
             except:
                 continue
+            visible = z == z_offsets[0]
             add_layers([d], 
                        viewer, 
                        names=[f'{dataset_name}_{z}'], 
                        voxel_offsets=[voxel_offset],
                        visible=visible,
                        clear_viewer=False)
-            visible = False
     elif mode == 'all_ds':
         dataset_paths = [d for d in sorted(glob(os.path.join(dataset_path, '*'))) if '_mask' not in d]
 
-        visible = True
         for dataset_path in dataset_paths:
             dataset_name = os.path.basename(dataset_path)
             d = read_data(dataset_path, bounding_box=bounding_box, keep_missing=keep_missing)
+            visible = dataset_path == dataset_paths[0]
             add_layers([d], 
                        viewer, 
                        names=[dataset_name], 
                        voxel_offsets=[voxel_offset],
                        visible=visible,
                        clear_viewer=False)
-            visible = False
     elif mode == 'all_ds_first_z':
         dataset_paths = [d for d in sorted(glob(os.path.join(dataset_path, '*'))) if '_mask' not in d]
 
-        visible = True
         for dataset_path in dataset_paths:
             dataset_name = os.path.basename(dataset_path)
             dataset = open_store(dataset_path, mode='r', dtype=ts.uint8)
             d, _ = find_ref_slice(dataset)
+            visible = dataset_path == dataset_paths[0]
             add_layers([d], 
                        viewer, 
                        names=[dataset_name], 
                        voxel_offsets=[voxel_offset],
                        visible=visible,
                        clear_viewer=False)
-            visible = False
     input('All data loaded. Press ENTER or ESCAPE to exit.')
 
 
@@ -175,7 +196,8 @@ if __name__ == '__main__':
                         required=True,
                         type=str,
                         default=None,
-                        help='Path to a dataset inside a zarr container.')
+                        help='Path to a zarr dataset or container. If a container is provided,'\
+                        'the script auto-detects dataset or xy_intermediate.')
     parser.add_argument('--bbox',
                         metavar='DATA_RANGE',
                         dest='bounding_box',
@@ -189,12 +211,13 @@ if __name__ == '__main__':
                         default=False,
                         action='store_true',
                         help='Keep missing slices as black images. Default: False')
-    parser.add_argument('-p', '--project_dir',
-                        metavar='PROJECT_DIR',
-                        dest='project_dir',
+    parser.add_argument('-cfg', '--config',
+                        metavar='PROJECT_CONFIGS',
+                        dest='project_configs',
                         required=False,
+                        # nargs='+',
                         type=str,
-                        help='Path to the project directory containing information about the dataset\'s transitions.')
+                        help='Path to the project configs containing information about the dataset\'s transitions.')
     parser.add_argument('--mode',
                         dest='mode',
                         type=str,
@@ -217,3 +240,4 @@ if __name__ == '__main__':
     args=parser.parse_args()
 
     inspect_dataset(**vars(args))
+
