@@ -355,7 +355,7 @@ if __name__ == '__main__':
                         dest='config_z_path',
                         required=True,
                         type=str,
-                        help='Path to Z alignment parameters config.')
+                        help='Path to Z alignment parameters config. This is a JSON file containing parameters used for computing flow, mesh optimization, and for rendering.')
 
     # Optional arguments
     parser.add_argument('-cfg', '--config',
