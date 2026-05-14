@@ -91,9 +91,10 @@ def inspect_dataset(
         keep_missing (bool, optional): Whether to skip fully black images. Defaults to False.
         project_configs (list of `str`, optional): List of absolute paths to configuration files containing information about datasets to display, when mode=z_transitions. Defaults to [].
         mode (str, optional): Mode to use to display data. If no mode is given, will simply read data from the path provided.
-            One of: `None`, z_transitions, all_ds. Defaults to None.
+            One of: `None`, z_transitions, all_ds_xy, all_ds_xy_first_z. Defaults to None.
             z_transitions: Determines from project_configs all the z indices where a transition occurred (i.e. two stacks were aligned) and show images around transitions.
-            all_ds: Reads data within data_range from all the datasets found in the provided store.
+            all_ds_xy: Reads data within data_range from all the datasets found in the provided store.
+            all_ds_xy_first_z: Same as all_ds_xy but shows only first slice containing data.
         bind_port (int, optional): Port to bind the neuroglancer viewer to. Defaults to 55555.
     '''
     dataset_path, mode = resolve_dataset_path(dataset_path, mode=mode)
@@ -103,7 +104,7 @@ def inspect_dataset(
         print(f'Dataset shape (ZYX):\n    {dataset.shape}')
         sys.exit()
         
-    modes = ['z_transitions', 'all_ds', 'all_ds_first_z']
+    modes = ['z_transitions', 'all_ds_xy', 'all_ds_xy_first_z']
     if mode is not None and mode not in modes:
         raise ValueError(f'Invalid mode. Must be one of: {modes}')
 
@@ -156,7 +157,7 @@ def inspect_dataset(
                        voxel_offsets=[voxel_offset],
                        visible=visible,
                        clear_viewer=False)
-    elif mode == 'all_ds':
+    elif mode == 'all_ds_xy':
         dataset_paths = [d for d in sorted(glob(os.path.join(dataset_path, '*'))) if '_mask' not in d]
 
         for dataset_path in dataset_paths:
@@ -169,7 +170,7 @@ def inspect_dataset(
                        voxel_offsets=[voxel_offset],
                        visible=visible,
                        clear_viewer=False)
-    elif mode == 'all_ds_first_z':
+    elif mode == 'all_ds_xy_first_z':
         dataset_paths = [d for d in sorted(glob(os.path.join(dataset_path, '*'))) if '_mask' not in d]
 
         for dataset_path in dataset_paths:
