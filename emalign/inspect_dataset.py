@@ -55,20 +55,50 @@ def resolve_dataset_path(dataset_path, mode=None):
     # If a direct dataset path is provided, use it as-is.
     if os.path.exists(os.path.join(dataset_path, '.zarray')):
         return dataset_path, mode
+    elif not dataset_path.endswith('.zarr') and not dataset_path.endswith('xy_intermediate'):
+        raise ValueError('Please provide a valid dataset_path. Should be one of: zarr container (ending with ".zarr"), a zarr dataset, or the xy_intermediate level.')
 
-    # If container root is provided after XY alignment, default to xy_intermediate in all_ds mode.
+    # Inspect XY intermediate steps if xy_intermediate is provided with or without mode
+    # or the appropriate mode is given with the root of the container
+    if dataset_path.endswith('xy_intermediate') or mode in ['all_ds_xy', 'all_ds_xy_first_z']:            
+        if dataset_path.endswith('xy_intermediate'):
+            xy_intermediate = dataset_path
+        else:
+            # If mode is asks for it, find xy_intermediate.
+            xy_intermediate = os.path.join(dataset_path, 'xy_intermediate')
+        if mode is None:
+            mode = 'all_ds_xy'
+        if os.path.isdir(xy_intermediate):
+            print(f'Using xy_intermediate folder as input.')
+            return xy_intermediate, mode
+        else:
+            raise FileNotFoundError(f'xy_intermediate subfolder does not exist: {xy_intermediate}')
+    
+    # Check for existing subfolders in the container root
+    levels = os.listdir(dataset_path)
+
+    # If container root is provided after Z alignment or mode is z_transitions, default to the output dataset.
+    if any(['intermediate' not in l for l in levels]) or mode == 'z_transitions':
+        # For this we need to have more than the intermediate outputs
+        output_ds = [l for l in levels if l.endswith('_mask')]
+
+        if len(output_ds) > 0:    
+            output_ds = output_ds[0].removesuffix('_mask')
+            z_dataset = os.path.join(dataset_path, output_ds)
+            print(f'Using output dataset as input: {output_ds}')
+            return z_dataset, mode
+        else:
+            raise ValueError('Output dataset not found. Did you run Z alignment?')
+
+    # We have no specific mode, so let's try xy_intermediate with the right mode
+    print('Only intermediate steps exist and no mode was provided, will default to mode "all_ds_xy".')
+    mode = 'all_ds_xy'
     xy_intermediate = os.path.join(dataset_path, 'xy_intermediate')
     if os.path.isdir(xy_intermediate):
-        if mode is None:
-            mode = 'all_ds'
+        print(f'Using xy_intermediate folder as input.')
         return xy_intermediate, mode
-
-    # If container root is provided after Z alignment, use final dataset.
-    z_dataset = os.path.join(dataset_path, 'dataset')
-    if os.path.exists(os.path.join(z_dataset, '.zarray')):
-        return z_dataset, mode
-
-    return dataset_path, mode
+    else:
+        raise FileNotFoundError(f'xy_intermediate subfolder does not exist: {xy_intermediate}')
 
 
 def inspect_dataset(
@@ -223,7 +253,7 @@ if __name__ == '__main__':
                         dest='mode',
                         type=str,
                         default=None,
-                        help='Visualization mode. One of: z_transitions, all_ds, all_ds_first_z')
+                        help='Visualization mode. One of: z_transitions, all_ds_xy, all_ds_xy_first_z')
     parser.add_argument('--port',
                         metavar='PORT',
                         dest='bind_port',
