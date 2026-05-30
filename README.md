@@ -43,7 +43,7 @@ Neuroglancer is currently required for data visualization. Its installation may 
 python -m emalign.prep_config_xy \
   -i /path/to/tiles/directory \
   -p /path/to/project_dir \
-  -o output.zarr \
+  -o /path/to/output.zarr \
   -r 10 10 \
   --mode volumescope \
   -c 4
