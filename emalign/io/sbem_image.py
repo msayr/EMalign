@@ -11,6 +11,7 @@ FILE_EXT = ".tif"
 
 _TILE_YX_POS = {}
 _TILE_YX_SOURCE = None
+_TILE_YX_PROJECT_ROOT = None
 
 
 def _clean_resolution(v):
@@ -184,6 +185,33 @@ def get_tilesets(main_dir, resolution, dir_patterns=None, num_workers=None):
 
     return sorted(stack_list)
 
+
+def _basename(path):
+    return Path(str(path).replace("\\", os.sep)).name
+
+
+def _tile_key_from_name(path):
+    """Return the grid/tile identifier shared by all z-slices of one tile."""
+
+    fname = _basename(path)
+    m = re.search(r"_g(\d+)_t(\d+)_s\d+", fname)
+
+    if m is None:
+        return None
+
+    return int(m.group(1)), int(m.group(2))
+
+
+def _lookup_keys(path):
+    keys = [_basename(path)]
+    tile_key = _tile_key_from_name(path)
+
+    if tile_key is not None:
+        keys.append(tile_key)
+
+    return keys
+
+
 def _build_tile_yx_pos_map_from_imagelist(imagelist_path):
     entries = []
 
@@ -200,7 +228,8 @@ def _build_tile_yx_pos_map_from_imagelist(imagelist_path):
                 continue
 
             raw_path = parts[0]
-            fname = Path(raw_path.replace("\\", os.sep)).name
+            fname = _basename(raw_path)
+            tile_key = _tile_key_from_name(fname)
 
             try:
                 x = int(parts[1])
@@ -208,36 +237,45 @@ def _build_tile_yx_pos_map_from_imagelist(imagelist_path):
             except ValueError:
                 continue
 
-            entries.append((fname, y, x))
+            entries.append((fname, tile_key, y, x))
 
     if not entries:
         return {}
 
-    x_vals = sorted({x for _, _, x in entries})
-    y_vals = sorted({y for _, y, _ in entries})
+    x_vals = sorted({x for _, _, _, x in entries})
+    y_vals = sorted({y for _, _, y, _ in entries})
 
     x_to_col = {x: i for i, x in enumerate(x_vals)}
     y_to_row = {y: i for i, y in enumerate(y_vals)}
 
-    return {
-        fname: (y_to_row[y], x_to_col[x])
-        for fname, y, x in entries
-    }
+    tile_map = {}
+
+    for fname, tile_key, y, x in entries:
+        pos = (y_to_row[y], x_to_col[x])
+        tile_map[fname] = pos
+
+        if tile_key is not None:
+            tile_map[tile_key] = pos
+
+    return tile_map
 
 
 def _ensure_tile_yx_pos_map(n):
-    global _TILE_YX_POS, _TILE_YX_SOURCE
+    global _TILE_YX_POS, _TILE_YX_SOURCE, _TILE_YX_PROJECT_ROOT
 
-    fname = Path(str(n).replace("\\", os.sep)).name
-
-    if fname in _TILE_YX_POS:
-        return
-
+    lookup_keys = _lookup_keys(n)
     project_root = _find_project_root(n)
+
+    if (
+        project_root is not None
+        and project_root == _TILE_YX_PROJECT_ROOT
+        and any(key in _TILE_YX_POS for key in lookup_keys)
+    ):
+        return
 
     if project_root is None:
         raise KeyError(
-            f"No cached tile position found for {fname!r}, and project root "
+            f"No cached tile position found for {_basename(n)!r}, and project root "
             f"could not be inferred from path {n!r}."
         )
 
@@ -250,13 +288,14 @@ def _ensure_tile_yx_pos_map(n):
     for imagelist_path in imagelist_files:
         tile_map = _build_tile_yx_pos_map_from_imagelist(imagelist_path)
 
-        if fname in tile_map:
+        if any(key in tile_map for key in lookup_keys):
             _TILE_YX_POS = tile_map
             _TILE_YX_SOURCE = imagelist_path
+            _TILE_YX_PROJECT_ROOT = project_root
             return
 
     raise KeyError(
-        f"No tile position found for {fname!r} in imagelist files under {logs_dir}"
+        f"No tile position found for {_basename(n)!r} in imagelist files under {logs_dir}"
     )
 
 
@@ -268,12 +307,15 @@ def parse_yx_pos_from_name(n):
         parse_yx_pos_from_name(path) -> tuple[int, int]
     """
 
-    fname = Path(str(n).replace("\\", os.sep)).name
-
     _ensure_tile_yx_pos_map(n)
 
-    return _TILE_YX_POS[fname]
+    for key in _lookup_keys(n):
+        if key in _TILE_YX_POS:
+            return _TILE_YX_POS[key]
 
+    raise KeyError(
+        f"No tile position found for {_basename(n)!r} in {_TILE_YX_SOURCE}"
+    )
 
 
 def parse_slice_from_name(n):
@@ -282,7 +324,7 @@ def parse_slice_from_name(n):
         <project>_g0001_t0002_s00003.tif
     """
 
-    m = re.search(r"_s(\d+)", Path(str(n)).name)
+    m = re.search(r"_s(\d+)", _basename(n))
 
     if m is None:
         raise ValueError(f"Could not parse slice index from filename: {n}")
