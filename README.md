@@ -40,13 +40,16 @@ Neuroglancer is currently required for data visualization. Its installation may 
 
 **Prepare configuration**:
 ```bash
-python prep_config_xy \
+python -m emalign.prep_config_xy \
   -i /path/to/tiles/directory \
   -p /path/to/project_dir \
-  -o /path/to/zarr.zarr \
-  -res 10 10 \
+  -o output.zarr \
+  -r 10 10 \
+  --mode volumescope \
   -c 4
 ```
+
+If you use the installed console script instead, run `prep_config_xy` with the same arguments. When splitting the command across lines, keep a trailing `\` on every continued line; otherwise the next option (for example `-c`) is interpreted as a separate shell command.
 
 **Execute alignment**:
 ```bash
