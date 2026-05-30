@@ -1,4 +1,11 @@
 import os
+import sys
+
+# Allow this file to be executed directly from a source checkout, e.g.
+# `python emalign/prep_config_xy.py`, before importing the `emalign` package.
+if __package__ in (None, ''):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # To prevent running out of memory because of preallocation
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 
@@ -13,13 +20,9 @@ import json
 import logging
 import numpy as np
 import pandas as pd
-import sys
 import re
 from glob import glob
 from tqdm import tqdm
-
-from emalign.align_xy.prep import find_offset_from_main_config, get_stacks, check_stacks_to_invert
-from emalign.io.backend import get_io_backend
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger('absl').setLevel(logging.WARNING)
@@ -44,7 +47,13 @@ def prep_align_stacks(main_dir,
                       io_mode='volumescope',
                       project_name=None,
                       force_overwrite=False):
-    
+    from emalign.align_xy.prep import (
+        check_stacks_to_invert,
+        find_offset_from_main_config,
+        get_stacks,
+    )
+    from emalign.io.backend import get_io_backend
+
     io_backend = get_io_backend(io_mode)
     
     # Make config dir
@@ -173,8 +182,7 @@ def prep_align_stacks(main_dir,
             json.dump(main_config, f, indent='')
 
 
-if __name__ == '__main__':
-
+def main():
     parser=argparse.ArgumentParser('Script aligning tiles in XY based on SOFIMA (Scalable Optical Flow-based Image Montaging and Alignment). \n\
                                     This script was written to match the file structure produced by the ThermoFisher MAPs software.')
     
@@ -284,4 +292,9 @@ if __name__ == '__main__':
 
     args=parser.parse_args()
 
-    prep_align_stacks(**vars(args)) 
+    prep_align_stacks(**vars(args))
+
+
+if __name__ == '__main__':
+    main()
+

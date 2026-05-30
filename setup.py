@@ -26,5 +26,10 @@ setup(
         extras_require={
             'neuroglancer': ['neuroglancer']
         },
+        entry_points={
+            'console_scripts': [
+                'prep_config_xy=emalign.prep_config_xy:main',
+            ],
+        },
         keywords=['python', 'alignment']
     )
