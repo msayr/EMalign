@@ -1,0 +1,359 @@
+'''
+Utilities for finding and reading files produced by the SBEM Image software.
+'''
+from pathlib import Path
+from glob import glob
+import logging
+import os
+import re
+
+FILE_EXT = ".tif"
+
+_TILE_YX_POS = {}
+_TILE_YX_SOURCE = None
+
+
+def _clean_resolution(v):
+    v = float(v)
+    return int(v) if v.is_integer() else v
+
+
+def _find_project_root(path):
+    parts = os.path.normpath(str(path)).split(os.sep)
+
+    if "tiles" not in parts:
+        return None
+
+    tiles_i = parts.index("tiles")
+    root = os.sep.join(parts[:tiles_i])
+
+    return root if root else os.sep
+
+
+def _infer_grid_name(path):
+    parts = os.path.normpath(str(path)).split(os.sep)
+
+    for part in parts:
+        if re.fullmatch(r"g\d+", part):
+            return part
+
+    return None
+
+
+def _read_pixel_sizes(config_path):
+    with open(config_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    m = re.search(r"pixel_size\s*=\s*\[([^\]]+)\]", content)
+
+    if m is None:
+        return None
+
+    return [
+        _clean_resolution(x.strip())
+        for x in m.group(1).split(",")
+        if x.strip()
+    ]
+
+
+def get_tileset_resolution(tileset_path):
+    """
+    Return (tileset_path, (y_res, x_res)) or None.
+
+    Works for paths like:
+        project/tiles/g0000/t0000/
+        project/tiles/g0000/
+    """
+
+    grid_name = _infer_grid_name(tileset_path)
+
+    if grid_name is None:
+        logging.warning(f"Could not infer grid index from path: {tileset_path}")
+        return None
+
+    grid_idx = int(grid_name[1:])
+
+    project_root = _find_project_root(tileset_path)
+
+    if project_root is None:
+        logging.warning(f"Could not find 'tiles' directory in path: {tileset_path}")
+        return None
+
+    logs_dir = os.path.join(project_root, "meta", "logs")
+    config_files = sorted(glob(os.path.join(logs_dir, "config_*.txt")))
+
+    if not config_files:
+        logging.warning(f"No config_*.txt files found in {logs_dir}")
+        return None
+
+    resolutions = []
+
+    for cfg in config_files:
+        pixel_sizes = _read_pixel_sizes(cfg)
+
+        if pixel_sizes is None:
+            logging.warning(f"No pixel_size found in {cfg}")
+            continue
+
+        if grid_idx >= len(pixel_sizes):
+            logging.warning(f"{grid_name} not found in pixel_size list in {cfg}")
+            continue
+
+        res = pixel_sizes[grid_idx]
+        resolutions.append((cfg, (res, res)))
+
+    if not resolutions:
+        logging.warning(f"Could not determine resolution for {tileset_path}")
+        return None
+
+    return tileset_path, resolutions[-1][1]
+
+def get_tilesets(main_dir, resolution, dir_patterns=None, num_workers=None):
+    """
+    Return sorted tXXXX directories matching resolution.
+
+    Expected image location:
+        main_dir/tiles/gXXXX/tXXXX/*.tif
+
+    Returns:
+        [
+            ".../tiles/g0000/t0000/",
+            ".../tiles/g0000/t0001/",
+            ".../tiles/g0001/t0000/",
+        ]
+    """
+
+    if dir_patterns is None:
+        dir_patterns = []
+
+    target_resolution = tuple(_clean_resolution(v) for v in resolution)
+
+    tiles_root = os.path.join(main_dir, "tiles")
+    logs_dir = os.path.join(main_dir, "meta", "logs")
+
+    if not os.path.isdir(tiles_root):
+        logging.warning(f"Could not find tiles directory: {tiles_root}")
+        return []
+
+    if not os.path.isdir(logs_dir):
+        logging.warning(f"Could not find logs directory: {logs_dir}")
+        return []
+
+    config_files = sorted(glob(os.path.join(logs_dir, "config_*.txt")))
+
+    if not config_files:
+        logging.warning(f"No config_*.txt files found in {logs_dir}")
+        return []
+
+    latest_config = config_files[-1]
+    pixel_sizes = _read_pixel_sizes(latest_config)
+
+    if pixel_sizes is None:
+        logging.warning(f"No pixel_size found in {latest_config}")
+        return []
+
+    tile_dirs = sorted(glob(os.path.join(tiles_root, "g*", "t*", "")))
+
+    stack_list = []
+
+    for tile_dir in tile_dirs:
+        grid_name = Path(tile_dir).parent.name
+
+        if not re.fullmatch(r"g\d+", grid_name):
+            continue
+
+        grid_idx = int(grid_name[1:])
+
+        if grid_idx >= len(pixel_sizes):
+            logging.warning(f"No pixel_size entry for {grid_name}")
+            continue
+
+        res = pixel_sizes[grid_idx]
+        grid_resolution = (res, res)
+
+        if grid_resolution != target_resolution:
+            continue
+
+        if dir_patterns:
+            norm_path = os.path.normpath(tile_dir)
+            if not any(pattern in norm_path for pattern in dir_patterns):
+                continue
+
+        if glob(os.path.join(tile_dir, f"*{FILE_EXT}")):
+            stack_list.append(os.path.abspath(tile_dir))
+
+    return sorted(stack_list)
+    
+# def parse_yx_pos_from_name(n):
+    '''
+    (Note that this function name is misleading but kept to match "volumescope.py" for now).
+    
+    Extract relative tile positions formatted as (y, x) from imagelist metadata file. For instance, 
+    in a slice with a single grid (grid 0) that has 2 tiles (1 row 2 columns), the left tile position is (0, 0) and the 
+    right tile position is (0, 1). If a second grid with a single tile were to be added below grid 0, 
+    the first two tiles maintain the same position as above and the new grid tile would have position (1, 0). 
+
+    Because the relative position of the grids can be arbitrary, the most reliable way to determined 
+    tile position is by using the exact tile coordinates.
+    
+    1. Extract filename of the image with the lowest z slice ('sxxxxx') for each tile using get_tilesets(). For instance, 
+    if a directory contains only three images named: 
+
+    <project>_g0001_t0002_s00003.tif
+    <project>_g0001_t0002_s00004.tif
+    <project>_g0001_t0002_s00005.tif
+
+    then the function extracts <project>_g0001_t0002_s00003.tif. 
+    
+    2. Using the extracted filenames as keys, locate entry in meta/logs/imagelist_<datetime>.txt that matches the filename. 
+    There will be many imagelist files to check, but the correct file will likely be the first chronologically. Here is an 
+    example entry in imagelist_<datetime>.txt: 
+
+    tiles\g0000\t0000\<project>_g0000_t0000_s00000.tif;-608632;-619022;0;0
+
+    Where:    
+    . - 608632 = X coordinate 
+    . - 619022 = Y coordinate
+    . 0 = Z coordinate: 0 nm (slice 0)
+    . 0 = Slice counter: slice 0
+
+    The two values to extract are the X and Y coordinate which indicate the top-left corner of the image tile. 
+    These coordinates are then compared to all other image tiles to roughly determine approximate relative tile positions. 
+
+    Here is an example for a project that has three image tiles. The first two are part of grid 0
+    and the second is grid 1.  
+
+    tiles\g0000\t0000\<project>_g0000_t0000_s00000.tif;-608632;-619022;0;0
+    tiles\g0000\t0001\<project>_g0000_t0001_s00000.tif;-421332;-619022;0;0
+    tiles\g0001\t0000\<project>_g0001_t0000_s00000.tif;-683129;-493211;0;0
+
+    Resulting grid shape:
+
+    "tiles\\g0000\\t0000\\<project>_g0000_t0000_s00000.tif": (0, 1),
+    "tiles\\g0000\\t0001\\<project>_g0000_t0001_s00000.tif": (0, 2),
+    "tiles\\g0001\\t0000\\<project>_g0001_t0000_s00000.tif": (1, 0)
+
+    Args:
+        n: Tile filename or full path (e.g., 'Tile_003-002_s0001.tif')
+
+    Returns:
+        Tuple (y, x) as 0-indexed integers representing the tile's position
+        in the grid. Example: 
+        ... 
+        (1, 2)
+
+    Notes for implementing other backends:
+        - Must return a tuple of (y, x) as 0-indexed integers
+        - The tuple is used as a dictionary key to identify tiles
+        - All tiles in a slice should have unique (y, x) positions
+        - Convention: (0, 0) is top-left of the tile grid
+    '''
+
+    # old - updated below with logic above
+    # xy_pos = re.findall(r'\d+', n)[:2] # first two numbers in the name
+    # return tuple(int(i)-1 for i in xy_pos)[::-1]
+
+def _build_tile_yx_pos_map_from_imagelist(imagelist_path):
+    entries = []
+
+    with open(imagelist_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+
+            if not line:
+                continue
+
+            parts = line.split(";")
+
+            if len(parts) < 3:
+                continue
+
+            raw_path = parts[0]
+            fname = Path(raw_path.replace("\\", os.sep)).name
+
+            try:
+                x = int(parts[1])
+                y = int(parts[2])
+            except ValueError:
+                continue
+
+            entries.append((fname, y, x))
+
+    if not entries:
+        return {}
+
+    x_vals = sorted({x for _, _, x in entries})
+    y_vals = sorted({y for _, y, _ in entries})
+
+    x_to_col = {x: i for i, x in enumerate(x_vals)}
+    y_to_row = {y: i for i, y in enumerate(y_vals)}
+
+    return {
+        fname: (y_to_row[y], x_to_col[x])
+        for fname, y, x in entries
+    }
+
+
+def _ensure_tile_yx_pos_map(n):
+    global _TILE_YX_POS, _TILE_YX_SOURCE
+
+    fname = Path(str(n).replace("\\", os.sep)).name
+
+    if fname in _TILE_YX_POS:
+        return
+
+    project_root = _find_project_root(n)
+
+    if project_root is None:
+        raise KeyError(
+            f"No cached tile position found for {fname!r}, and project root "
+            f"could not be inferred from path {n!r}."
+        )
+
+    logs_dir = os.path.join(project_root, "meta", "logs")
+    imagelist_files = sorted(glob(os.path.join(logs_dir, "imagelist_*.txt")))
+
+    if not imagelist_files:
+        raise FileNotFoundError(f"No imagelist_*.txt files found in {logs_dir}")
+
+    for imagelist_path in imagelist_files:
+        tile_map = _build_tile_yx_pos_map_from_imagelist(imagelist_path)
+
+        if fname in tile_map:
+            _TILE_YX_POS = tile_map
+            _TILE_YX_SOURCE = imagelist_path
+            return
+
+    raise KeyError(
+        f"No tile position found for {fname!r} in imagelist files under {logs_dir}"
+    )
+
+
+def parse_yx_pos_from_name(n):
+    """
+    Return relative tile position as (y, x).
+
+    Compatible with the VolumeScope interface:
+        parse_yx_pos_from_name(path) -> tuple[int, int]
+    """
+
+    fname = Path(str(n).replace("\\", os.sep)).name
+
+    _ensure_tile_yx_pos_map(n)
+
+    return _TILE_YX_POS[fname]
+
+
+
+def parse_slice_from_name(n):
+    """
+    Extract z-slice index from filenames like:
+        <project>_g0001_t0002_s00003.tif
+    """
+
+    m = re.search(r"_s(\d+)", Path(str(n)).name)
+
+    if m is None:
+        raise ValueError(f"Could not parse slice index from filename: {n}")
+
+    return int(m.group(1))
