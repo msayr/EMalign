@@ -1,13 +1,5 @@
 import argparse
 import os
-import sys
-
-# Allow this file to be executed directly from a source checkout, e.g.
-# `python emalign/scripts/align_stack_z.py`, before package-relative imports.
-if __package__ in (None, ''):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    __package__ = 'emalign.scripts'
-
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 # os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'cuda_async'
 os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'platform'
