@@ -52,7 +52,7 @@ def proc_invert(img):
     return np.invert(img).astype(np.uint8)
 
 
-def proc_gaussian(img, mask=None, kernel_size=(3,3), sigma=1):
+def proc_gaussian(img, mask=None, kernel_size=(3,3), sigma=0.7):
     '''
     Apply gaussian filter to image by convolving a kernel of size kernel_size.
     Sigma value corresponds to how strong the effect is (peak of gaussian).
