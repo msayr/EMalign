@@ -186,6 +186,23 @@ def get_tilesets(main_dir, resolution, dir_patterns=None, num_workers=None):
     return sorted(stack_list)
 
 
+def get_stack_name(stack_path):
+    """Return a unique stack name for an SBEM Image tile directory.
+
+    SBEM Image stores stacks under ``tiles/gXXXX/tXXXX``. Tile directory
+    basenames such as ``t0000`` are not globally unique across grids, so include
+    both the grid and tile directory names in the stack identifier.
+    """
+
+    path = Path(stack_path)
+    tile_name = path.name
+    grid_name = path.parent.name
+
+    if re.fullmatch(r"g\d+", grid_name) and re.fullmatch(r"t\d+", tile_name):
+        return f"{grid_name}_{tile_name}"
+
+    return path.name
+
 def _basename(path):
     return Path(str(path).replace("\\", os.sep)).name
 

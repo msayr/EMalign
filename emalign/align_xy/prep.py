@@ -153,8 +153,16 @@ def get_stacks(stack_paths,
     return new_stacks
 
 
+def _get_stack_name(stack_path, io_backend=None):
+    if io_backend is not None and hasattr(io_backend, 'get_stack_name'):
+        return io_backend.get_stack_name(stack_path)
+
+    return os.path.basename(os.path.normpath(stack_path))
+
+
 def check_stacks_to_invert(stack_list, 
-                           num_workers=1, 
+                           num_workers=1,
+                           io_backend=None,
                            **kwargs):
 
     '''Check what stacks must be inverted
@@ -178,7 +186,7 @@ def check_stacks_to_invert(stack_list,
     with futures.ThreadPoolExecutor(num_workers) as tpe:
         fs = {}
         for stack_path in sorted(stack_list):
-            stack_name = os.path.basename(os.path.normpath(stack_path))
+            stack_name = _get_stack_name(stack_path, io_backend)
             tif_files = glob(os.path.join(stack_path, '*.tif'))
             if not tif_files:
                 logging.warning(f'No TIF files found in {stack_path}, skipping')

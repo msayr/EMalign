@@ -87,3 +87,16 @@ def test_parse_tile_position_uses_imagelist_tile_key_for_all_slices(tmp_path):
         )
         == 1
     )
+
+
+def test_sbem_stack_name_includes_grid_and_tile(tmp_path):
+    project = _write_project(tmp_path)
+
+    assert (
+        sbem_image.get_stack_name(project / "tiles" / "g0000" / "t0000")
+        == "g0000_t0000"
+    )
+    assert (
+        sbem_image.get_stack_name(project / "tiles" / "g0001" / "t0000")
+        == "g0001_t0000"
+    )
