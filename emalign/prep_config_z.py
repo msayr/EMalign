@@ -8,13 +8,18 @@ Usage:
         --force-overwrite
 '''
 
+import os
+import sys
+
+# Allow this file to be executed directly from a source checkout, e.g.
+# `python emalign/prep_config_z.py`, before importing the `emalign` package.
+if __package__ in (None, ''):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
 import json
 import logging
 import numpy as np
-import os
-import sys
-
 from glob import glob
 from typing import List, Optional
 
