@@ -11,13 +11,6 @@ Usage:
 '''
 
 import os
-import sys
-
-# Allow this file to be executed directly from a source checkout, e.g.
-# `python emalign/align_dataset_z.py`, before importing the `emalign` package.
-if __package__ in (None, ''):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 # To prevent running out of memory because of preallocation
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'platform'
@@ -30,6 +23,8 @@ os.environ['MKL_NUM_THREADS'] = '4'
 import argparse
 import logging
 import numpy as np
+import sys
+
 from inspect import signature
 from typing import Optional
 

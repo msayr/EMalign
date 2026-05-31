@@ -2,13 +2,6 @@ import argparse
 import json
 import logging
 import os
-import sys
-
-# Allow this file to be executed directly from a source checkout, e.g.
-# `python emalign/scripts/fuse_stacks_xy.py`, before importing the `emalign` package.
-if __package__ in (None, ''):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 from emalign.align_xy.stitch_offgrid import stitch_images
 from emalign.io.progress import get_mongo_client, get_mongo_db, log_progress, check_progress, wipe_progress
 from emalign.io.store import write_data, open_store

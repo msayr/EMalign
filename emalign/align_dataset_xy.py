@@ -1,10 +1,4 @@
 import os
-import sys
-
-# Allow this file to be executed directly from a source checkout, e.g.
-# `python emalign/align_dataset_xy.py`, before importing the `emalign` package.
-if __package__ in (None, ''):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # To prevent running out of memory because of preallocation
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
@@ -22,6 +16,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, message="os.fork() wa
 import argparse
 import json
 import logging
+import sys
 from tqdm import tqdm
 
 from emalign.arrays.stacks import parse_stack_info

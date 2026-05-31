@@ -2,12 +2,6 @@ import argparse
 import json
 import os
 import sys
-
-# Allow this file to be executed directly from a source checkout, e.g.
-# `python emalign/inspect_dataset.py`, before importing the `emalign` package.
-if __package__ in (None, ''):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import tensorstore as ts
 
 from glob import glob
