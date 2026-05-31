@@ -24,7 +24,10 @@ class Stack:
             self.stack_path = None
         
         if stack_path is not None and stack_name is None:
-            self.stack_name = stack_path.split('/')[-2]
+            if hasattr(io_backend, 'get_stack_name'):
+                self.stack_name = io_backend.get_stack_name(self.stack_path)
+            else:
+                self.stack_name = os.path.basename(os.path.normpath(self.stack_path))
         else:
             self.stack_name = stack_name
 
