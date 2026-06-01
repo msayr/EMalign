@@ -41,8 +41,13 @@ class Stack:
         return self.stack_name
 
     def _get_tilemaps_paths(self):
-        # Produces lists of paths of all tifs contained in self.stack_path
-        tile_paths = glob(os.path.join(self.stack_path, f'*{self.file_ext}'))
+        # Produces lists of paths of all tifs contained in self.stack_path.
+        # Backends may expose logical stacks whose images are distributed
+        # across more than one directory.
+        if hasattr(self.io_backend, 'get_tile_paths'):
+            tile_paths = self.io_backend.get_tile_paths(self.stack_path)
+        else:
+            tile_paths = glob(os.path.join(self.stack_path, f'*{self.file_ext}'))
 
         # Get paths and group by slice
         self.slice_to_paths = defaultdict(list)
