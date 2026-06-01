@@ -187,7 +187,10 @@ def check_stacks_to_invert(stack_list,
         fs = {}
         for stack_path in sorted(stack_list):
             stack_name = _get_stack_name(stack_path, io_backend)
-            tif_files = glob(os.path.join(stack_path, '*.tif'))
+            if io_backend is not None and hasattr(io_backend, 'get_tile_paths'):
+                tif_files = io_backend.get_tile_paths(stack_path)
+            else:
+                tif_files = glob(os.path.join(stack_path, '*.tif'))
             if not tif_files:
                 logging.warning(f'No TIF files found in {stack_path}, skipping')
                 to_invert[stack_name] = False
