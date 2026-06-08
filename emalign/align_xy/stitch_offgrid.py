@@ -20,6 +20,10 @@ from ..arrays.overlap import get_overlap
 from .utils import mask_to_mesh
 
 
+class TransformEstimationError(RuntimeError):
+    """Raised when SIFT cannot estimate an affine transform for image stitching."""
+
+
 def get_elastic_mesh(pre, 
                      post, 
                      pre_mask, 
@@ -149,7 +153,20 @@ def stitch_images(img1,
     mask2 = mask2.astype(bool)
 
     # Estimate and apply transformation to reference image
-    M, img1_shape, img2_offset, _, _ = estimate_transform_sift(img2, img1, scale, refine_estimate=True)   
+    M, img1_shape, img2_offset, robust_estimate, robustness_metrics = estimate_transform_sift(
+        img2,
+        img1,
+        scale,
+        ref_mask=mask2,
+        mov_mask=mask1,
+        refine_estimate=True,
+    )
+    if M is None or img1_shape is None or img2_offset is None:
+        raise TransformEstimationError(
+            'SIFT could not estimate a valid transform between the fused canvas and stack image '
+            f'(scale={scale}, robust_estimate={robust_estimate}, '
+            f'robustness_metrics={robustness_metrics}).'
+        )
     img1 = cv2.warpAffine(img1, M, img1_shape[::-1])  
     mask1 = cv2.warpAffine(mask1.astype(np.uint8), M, img1_shape[::-1]).astype(bool)
 
