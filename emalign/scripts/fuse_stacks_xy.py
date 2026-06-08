@@ -5,7 +5,7 @@ import os
 import traceback
 from datetime import datetime, UTC
 from emalign.align_xy.stitch_offgrid import stitch_images
-from emalign.io.progress import get_mongo_client, get_mongo_db, log_progress, check_progress, wipe_progress
+from emalign.io.progress import get_mongo_client, get_mongo_db, log_progress, wipe_progress
 from emalign.io.store import write_data, open_store
 import tensorstore as ts
 
@@ -56,6 +56,24 @@ def build_failed_fuse_record(stack, z, global_slice_index, stage, error):
 def summarize_failed_fuse_record(record):
     """Return a shorter failed-fusion record for progress metadata."""
     return {k: v for k, v in record.items() if k != 'traceback'}
+
+
+def has_completed_fuse_progress(db, collection_name, step_name, local_slice_index):
+    """Return True only when a fuse slice has a completed progress record."""
+    collection = db[collection_name]
+    completed_filter = {
+        'step_name': step_name,
+        'local_slice': local_slice_index,
+        '$or': [
+            {'completed': True},
+            {'failed_image_count': 0},
+            {
+                'completed': {'$exists': False},
+                'failed_image_count': {'$exists': False},
+            },
+        ],
+    }
+    return collection.count_documents(completed_filter) > 0
 
 
 def get_fused_configs(
@@ -227,7 +245,7 @@ def fuse_stacks_group(config,
     pbarz = tqdm(range(z_shape), position=1)
     for z in pbarz:
         global_slice_index = z + config['zmin']
-        if check_progress(db, destination_name, step_name, z) and not overwrite:
+        if has_completed_fuse_progress(db, destination_name, step_name, z) and not overwrite:
             pbarz.set_description(f'Skipping {z}...')
             continue
         pbarz.set_description(f'Fusing stacks...')
@@ -307,6 +325,7 @@ def fuse_stacks_group(config,
             destination_mask, _ = write_data(destination_mask, canvas_mask, z)
 
         # Log progress
+        completed = len(failed_images) == 0
         metadata = {
             'mesh_parameters':{
                             'stride':stride,
@@ -316,6 +335,8 @@ def fuse_stacks_group(config,
                             'gamma':gamma
                             },
             'empty_slice': canvas is None,
+            'completed': completed,
+            'status': 'completed' if completed else 'incomplete',
             'failed_image_count': len(failed_images),
             'failed_images': failed_images,
             'failed_alignment_log_path': failed_alignment_log_path,
