@@ -2,6 +2,8 @@ import argparse
 import json
 import logging
 import os
+import traceback
+from datetime import datetime, UTC
 from emalign.align_xy.stitch_offgrid import stitch_images
 from emalign.io.progress import get_mongo_client, get_mongo_db, log_progress, check_progress, wipe_progress
 from emalign.io.store import write_data, open_store
@@ -17,6 +19,43 @@ from emalign.io.process.mask import compute_greyscale_mask
 
 
 # TODO: add a first slice test to make sure it is not missing images
+
+
+def _json_default(obj):
+    """Serialize NumPy/TensorStore values in diagnostic logs."""
+    if hasattr(obj, 'item'):
+        return obj.item()
+    return str(obj)
+
+
+def log_failed_fuse_image(log_path, record):
+    """Append one failed stack/slice fusion attempt to a JSONL log."""
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    with open(log_path, 'a') as f:
+        f.write(json.dumps(record, default=_json_default) + '\n')
+
+
+def build_failed_fuse_record(stack, z, global_slice_index, stage, error):
+    """Build a compact diagnostic record for a stack image that could not be fused."""
+    return {
+        'timestamp': datetime.now(UTC).isoformat(),
+        'stage': stage,
+        'local_slice': z,
+        'global_slice': global_slice_index,
+        'dataset_path': stack.get('dataset_path'),
+        'dataset_mask_path': stack.get('dataset_mask_path'),
+        'source_zmin': stack.get('zmin'),
+        'source_slice': z + stack.get('zmin', 0),
+        'target_scale': stack.get('target_scale'),
+        'error_type': type(error).__name__,
+        'error': str(error),
+        'traceback': ''.join(traceback.format_exception(type(error), error, error.__traceback__)),
+    }
+
+
+def summarize_failed_fuse_record(record):
+    """Return a shorter failed-fusion record for progress metadata."""
+    return {k: v for k, v in record.items() if k != 'traceback'}
 
 
 def get_fused_configs(
@@ -131,8 +170,16 @@ def fuse_stacks_group(config,
             ds_mask = open_store(ds_mask_path, mode='r', dtype=ts.bool)
             ds_mask = ds_mask[zmin:zmax]
         else:
+            ds_mask_path = None
             ds_mask = None
-        datasets.append({'dataset': ds, 'dataset_mask': ds_mask, 'target_scale': s, 'zmin': zmin})
+        datasets.append({
+            'dataset': ds,
+            'dataset_mask': ds_mask,
+            'target_scale': s,
+            'zmin': zmin,
+            'dataset_path': os.path.abspath(ds_path),
+            'dataset_mask_path': ds_mask_path,
+        })
 
     # Create destination
     if overwrite:
@@ -147,6 +194,7 @@ def fuse_stacks_group(config,
         destination_path = os.path.abspath(destination_path)
         destination_basepath = os.path.dirname(destination_path)
     destination_mask_path = os.path.join(destination_basepath, destination_name + '_mask')
+    failed_alignment_log_path = os.path.join(destination_basepath, destination_name + '_failed_alignments.jsonl')
 
     if overwrite or not os.path.exists(destination_path):
         # Create destination from scratch
@@ -179,31 +227,46 @@ def fuse_stacks_group(config,
     pbarz = tqdm(range(z_shape), position=1)
     for z in pbarz:
         global_slice_index = z + config['zmin']
-        if check_progress(db, destination_name, step_name, global_slice_index) and not overwrite:
+        if check_progress(db, destination_name, step_name, z) and not overwrite:
             pbarz.set_description(f'Skipping {z}...')
             continue
         pbarz.set_description(f'Fusing stacks...')
         canvas = None
         canvas_mask = None
+        failed_images = []
         pbar_stacks = tqdm(datasets, position=2, leave=False)
         for stack in pbar_stacks:
             pbar_stacks.set_description(f'Slice {z} in progress...')
-            dataset, dataset_mask, target_scale, zmin = stack.values()
+            dataset = stack['dataset']
+            dataset_mask = stack['dataset_mask']
+            target_scale = stack['target_scale']
+            zmin = stack['zmin']
 
-            # Load image
-            img = dataset[z + zmin].read().result()
-            if not img.any():
+            try:
+                # Load image
+                img = dataset[z + zmin].read().result()
+                if not img.any():
+                    continue
+
+                # Load or compute mask
+                if dataset_mask is None:
+                    mask = compute_greyscale_mask(img)
+                else:
+                    mask = dataset_mask[z + zmin].read().result()
+
+                # Resample to the correct resolution
+                img = resample(img, target_scale)
+                mask = resample(mask, target_scale)
+            except Exception as e:
+                failed_record = build_failed_fuse_record(stack, z, global_slice_index, 'load_or_prepare', e)
+                log_failed_fuse_image(failed_alignment_log_path, failed_record)
+                failed_summary = summarize_failed_fuse_record(failed_record)
+                failed_images.append(failed_summary)
+                logging.exception(
+                    'Skipping stack image that could not be loaded/prepared for fusion: %s',
+                    failed_summary,
+                )
                 continue
-
-            # Load or compute mask
-            if dataset_mask is None:
-                mask = compute_greyscale_mask(img)
-            else:
-                mask = dataset_mask[z + zmin].read().result()
-
-            # Resample to the correct resolution
-            img = resample(img, target_scale)
-            mask = resample(mask, target_scale)
             
             if canvas is None:
                 # First image
@@ -227,12 +290,15 @@ def fuse_stacks_group(config,
                                                     k=k,
                                                     gamma=gamma)
             except Exception as e:
-                # TODO: fix this. Error gets messy because of tqdm bars
-                print()
-                print()
-                print()
-                print(f'Error in stack (z = {z}): {stack}')
-                raise(e)
+                failed_record = build_failed_fuse_record(stack, z, global_slice_index, 'stitch', e)
+                log_failed_fuse_image(failed_alignment_log_path, failed_record)
+                failed_summary = summarize_failed_fuse_record(failed_record)
+                failed_images.append(failed_summary)
+                logging.exception(
+                    'Skipping stack image that could not be stitched into fused slice: %s',
+                    failed_summary,
+                )
+                continue
             
 
         if canvas is not None:
@@ -250,6 +316,9 @@ def fuse_stacks_group(config,
                             'gamma':gamma
                             },
             'empty_slice': canvas is None,
+            'failed_image_count': len(failed_images),
+            'failed_images': failed_images,
+            'failed_alignment_log_path': failed_alignment_log_path,
             'scale': scale,
             'img_on_top': img_on_top
                 }
