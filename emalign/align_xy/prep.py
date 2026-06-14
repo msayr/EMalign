@@ -223,7 +223,7 @@ def create_configs_fused_stacks(main_config_path,
         target_res = json.load(f)['resolution'][-1]
 
     # Find datasets
-    datasets, z_offsets = get_ordered_datasets([main_config_path], exclude=['flow', 'mask', '10x'])
+    datasets, z_offsets = get_ordered_datasets([main_config_path], exclude=['flow', 'mask', '10x', 'fused'])
     z_ranges = [np.arange(z[0], z[0] + ds.shape[0]) for z, ds in zip(z_offsets, datasets)]
 
     # Find all ranges over which there is overlap
