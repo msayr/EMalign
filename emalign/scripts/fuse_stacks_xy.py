@@ -78,7 +78,8 @@ def has_completed_fuse_progress(db, collection_name, step_name, local_slice_inde
 
 def get_fused_configs(
         main_config_path,
-        scale=0.1
+        scale=0.1,
+        overwrite=False
         ):
     '''Gather or compute configuration files for groups of stacks to fuse.
 
@@ -93,8 +94,16 @@ def get_fused_configs(
     # Output directory for the config files
     output_dir = os.path.dirname(os.path.abspath(main_config_path))
 
-    # Check for existing files
+    # Check for existing files.  These files are derived from the aligned
+    # xy_intermediate datasets, so they can become stale if stacks are added,
+    # removed, or re-run after the first fuse_stacks_xy invocation.
     config_filepaths = glob(os.path.join(output_dir, 'fuse_xy*.json'))
+
+    if overwrite and config_filepaths:
+        logging.info('Removing %d existing fuse_xy config file(s) before recomputing.', len(config_filepaths))
+        for filepath in config_filepaths:
+            os.remove(filepath)
+        config_filepaths = []
 
     if len(config_filepaths) == 0:
         # Compute and write configuration files
@@ -108,6 +117,10 @@ def get_fused_configs(
                     json.dump(config, f, indent='')
     else:
         # Load configuration files
+        logging.warning(
+            'Loading existing fuse_xy config file(s). If xy_intermediate stacks changed since '
+            'these were generated, rerun with --overwrite to recompute them.'
+        )
         overlapping_groups = []
         pbar = tqdm(config_filepaths, position=0, desc='Loading existing configurations')
         for filepath in pbar:
@@ -388,7 +401,8 @@ def align_fused_stacks_xy(config_path,
 
 
     fused_configs = get_fused_configs(config_path,
-                                      0.1)
+                                      0.1,
+                                      overwrite=overwrite)
     
     # Function to determine image quality to choose which one is on top
     # Highest value == on top
