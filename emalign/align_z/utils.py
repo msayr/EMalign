@@ -58,6 +58,9 @@ def get_ordered_datasets(config_paths, exclude=[]):
                 if any(check) or os.path.abspath(ds).endswith('_mask'):
                     # Always exclude masks from query
                     continue
+                if not os.path.exists(os.path.join(ds, '.zattrs')):
+                    logging.warning('Skipping incomplete dataset without .zattrs: %s', ds)
+                    continue
                 dataset = open_store(ds, mode='r')
                 z_shapes.append(dataset.shape[0])
 
