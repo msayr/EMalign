@@ -224,6 +224,8 @@ def create_configs_fused_stacks(main_config_path,
 
     # Find datasets
     datasets, z_offsets = get_ordered_datasets([main_config_path], exclude=['flow', 'mask', '10x', 'fused'])
+    dataset_names = [os.path.basename(os.path.abspath(ds.kvstore.path)) for ds in datasets]
+    logging.info('Found %d source dataset(s) for XY fusion: %s', len(dataset_names), dataset_names)
     z_ranges = [np.arange(z[0], z[0] + ds.shape[0]) for z, ds in zip(z_offsets, datasets)]
 
     # Find all ranges over which there is overlap
@@ -241,6 +243,13 @@ def create_configs_fused_stacks(main_config_path,
     for _, group in df.groupby('group'):
         z = group.z.min()
         indices = np.unique(group.ds_indices.to_numpy())[0]
+        group_names = [dataset_names[i] for i in indices]
+        logging.info(
+            'Testing XY fusion candidates for z=%s-%s: %s',
+            z,
+            group.z.max() + 1,
+            group_names,
+        )
 
         images = []
         for i in indices:
@@ -258,8 +267,21 @@ def create_configs_fused_stacks(main_config_path,
             valid_estimate = estimate_transform_sift(images[i], images[j], scale, refine_estimate=True)[3]
             if valid_estimate:
                 G.add_edge(indices[i], indices[j])
+                logging.info('Valid XY overlap: %s <-> %s', dataset_names[indices[i]], dataset_names[indices[j]])
+            else:
+                logging.warning('No valid XY overlap: %s <-> %s', dataset_names[indices[i]], dataset_names[indices[j]])
 
         # Valid matches are chained in case there are more than 2 matches for a range
+        matched_indices = set(G.nodes)
+        unmatched_names = [dataset_names[i] for i in indices if i not in matched_indices]
+        if unmatched_names:
+            logging.warning(
+                'No valid XY overlap was found for %s in z=%s-%s; these dataset(s) will not be included '
+                'in a fuse_xy config. This decision is made from SIFT matches on the image data, not from MongoDB.',
+                unmatched_names,
+                z,
+                group.z.max() + 1,
+            )
         for cc in nx.connected_components(G):
             config = {
                 'dataset_paths': [datasets[i].kvstore.path for i in cc], 
