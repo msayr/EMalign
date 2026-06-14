@@ -2,8 +2,16 @@ import argparse
 import json
 import logging
 import os
+import sys
 import traceback
 from datetime import datetime, UTC
+
+# Allow this file to be executed directly from a source checkout, e.g.
+# `python emalign/scripts/fuse_stacks_xy.py`, before importing the `emalign`
+# package.
+if __package__ in (None, ''):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from emalign.align_xy.stitch_offgrid import stitch_images
 from emalign.io.progress import get_mongo_client, get_mongo_db, log_progress, wipe_progress
 from emalign.io.store import write_data, open_store
@@ -79,13 +87,14 @@ def has_completed_fuse_progress(db, collection_name, step_name, local_slice_inde
 def get_fused_configs(
         main_config_path,
         scale=0.1,
-        overwrite=False
+        recompute=False
         ):
     '''Gather or compute configuration files for groups of stacks to fuse.
 
     Args:
         config_path (str): Absolute path to the main_config.json file for this project.
         scale (float, optional): Scale to downsample images for determining offset using SIFT. Defaults to 0.1.
+        recompute (bool, optional): Whether to remove existing fuse_xy*.json files and recompute them.
 
     Returns:
         fused_configs (list of `dict`): list of configuration file per segment of stacks to fuse.
@@ -99,7 +108,7 @@ def get_fused_configs(
     # removed, or re-run after the first fuse_stacks_xy invocation.
     config_filepaths = glob(os.path.join(output_dir, 'fuse_xy*.json'))
 
-    if overwrite and config_filepaths:
+    if recompute and config_filepaths:
         logging.info('Removing %d existing fuse_xy config file(s) before recomputing.', len(config_filepaths))
         for filepath in config_filepaths:
             os.remove(filepath)
@@ -119,7 +128,7 @@ def get_fused_configs(
         # Load configuration files
         logging.warning(
             'Loading existing fuse_xy config file(s). If xy_intermediate stacks changed since '
-            'these were generated, rerun with --overwrite to recompute them.'
+            'these were generated, rerun with --recompute-configs to recompute them.'
         )
         overlapping_groups = []
         pbar = tqdm(config_filepaths, position=0, desc='Loading existing configurations')
@@ -375,6 +384,7 @@ def align_fused_stacks_xy(config_path,
                           stride=40,
                           img_on_top='auto',
                           overwrite=False,
+                          recompute_configs=False,
                           wipe_progress_stack=None,
                           num_workers=1):
     '''Align groups of overlapping stacks one after the other.
@@ -386,6 +396,7 @@ def align_fused_stacks_xy(config_path,
         stride (int, optional): _description_. Defaults to 40.
         img_on_top (str, optional): _description_. Defaults to 'auto'.
         overwrite (bool, optional): _description_. Defaults to False.
+        recompute_configs (bool, optional): Whether to remove and rebuild cached fuse_xy*.json files. Defaults to False.
         wipe_progress_stack (str, optional): Name of the stack to wipe progress for. Defaults to None.
         num_workers (int, optional): _description_. Defaults to 1.
     '''
@@ -402,7 +413,7 @@ def align_fused_stacks_xy(config_path,
 
     fused_configs = get_fused_configs(config_path,
                                       0.1,
-                                      overwrite=overwrite)
+                                      recompute=recompute_configs)
     
     # Function to determine image quality to choose which one is on top
     # Highest value == on top
@@ -450,6 +461,9 @@ if __name__ == '__main__':
                         type=int,
                         help='Number of threads to use for rendering. Default: 1')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing dataset.')
+    parser.add_argument('--recompute-configs',
+                        action='store_true',
+                        help='Delete existing fuse_xy*.json files and recompute them from current xy_intermediate datasets.')
     parser.add_argument('--wipe-progress',
                         dest='wipe_progress_stack',
                         type=str,
@@ -461,4 +475,5 @@ if __name__ == '__main__':
     align_fused_stacks_xy(config_path=args.config_path,
                           num_workers=args.num_workers,
                           overwrite=args.overwrite,
+                          recompute_configs=args.recompute_configs,
                           wipe_progress_stack=args.wipe_progress_stack)
