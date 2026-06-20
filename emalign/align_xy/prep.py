@@ -228,9 +228,7 @@ def _format_sift_metrics(metrics):
     if not metrics:
         return ''
 
-    reason = metrics.get('reason')
-    if reason:
-        return f'; SIFT reason={reason}'
+    reason = metrics.get('reason') or _explain_sift_failure(metrics)
 
     fields = []
     for key in ('robustness_index', 'n_matches', 'n_inliers', 'mean_residual'):
@@ -240,7 +238,32 @@ def _format_sift_metrics(metrics):
                 value = f'{value:.3f}'
             fields.append(f'{key}={value}')
 
+    if reason:
+        fields.append(f'reason={reason}')
+
     return '; ' + ', '.join(fields) if fields else ''
+
+
+def _explain_sift_failure(metrics):
+    '''Return the dominant reason a SIFT estimate was rejected, if known.'''
+    if metrics.get('robustness_index', 1) >= 0.45:
+        return None
+
+    n_matches = metrics.get('n_matches')
+    n_inliers = metrics.get('n_inliers')
+    mean_residual = metrics.get('mean_residual')
+    pixel_tolerance = metrics.get('pixel_tolerance', 20)
+
+    if n_matches is not None and n_matches < 10:
+        return 'too few SIFT matches'
+    if n_inliers is not None and n_inliers < 6:
+        return 'too few SIFT inliers'
+    if mean_residual is not None and mean_residual > pixel_tolerance * 3:
+        return 'SIFT residual too high'
+    if metrics.get('min_requirements_met') is False:
+        return 'minimum SIFT requirements not met'
+
+    return 'low SIFT robustness'
 
 
 def _load_resampled_ref_slice(ds, local_z, target_res):
