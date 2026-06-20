@@ -213,6 +213,62 @@ def check_stacks_to_invert(stack_list,
     return to_invert
 
 
+
+def _candidate_overlap_slices(zmin, zmax, max_slices=5):
+    '''Return representative global z indices from an inclusive overlap range.'''
+    if zmax < zmin:
+        return []
+
+    zs = np.linspace(zmin, zmax, min(max_slices, zmax - zmin + 1), dtype=int)
+    return sorted({int(z) for z in zs})
+
+
+def _format_sift_metrics(metrics):
+    '''Format the most useful SIFT diagnostics for log messages.'''
+    if not metrics:
+        return ''
+
+    reason = metrics.get('reason')
+    if reason:
+        return f'; SIFT reason={reason}'
+
+    fields = []
+    for key in ('robustness_index', 'n_matches', 'n_inliers', 'mean_residual'):
+        if key in metrics:
+            value = metrics[key]
+            if isinstance(value, float):
+                value = f'{value:.3f}'
+            fields.append(f'{key}={value}')
+
+    return '; ' + ', '.join(fields) if fields else ''
+
+
+def _load_resampled_ref_slice(ds, local_z, target_res):
+    '''Load a representative slice from a dataset at the target XY resolution.'''
+    yx_res = get_store_attributes(ds)['resolution'][-1]
+    target_scale = yx_res / target_res
+    img, _ = find_ref_slice(ds, local_z)
+    return resample(img, target_scale)
+
+
+def _has_valid_xy_overlap(ds1, ds2, z_offset1, z_offset2, candidate_zs, target_res, scale):
+    '''Return whether any candidate z slice has a robust SIFT match.'''
+    last_metrics = None
+    for z in candidate_zs:
+        img1 = _load_resampled_ref_slice(ds1, z - z_offset1, target_res)
+        img2 = _load_resampled_ref_slice(ds2, z - z_offset2, target_res)
+        valid_estimate, metrics = estimate_transform_sift(
+            img1,
+            img2,
+            scale,
+            refine_estimate=True,
+        )[3:5]
+        last_metrics = metrics
+        if valid_estimate:
+            return True, z, metrics
+
+    return False, None, last_metrics
+
 # FUSE STACKS
 def create_configs_fused_stacks(main_config_path,
                                 scale = 0.1
@@ -251,25 +307,39 @@ def create_configs_fused_stacks(main_config_path,
             group_names,
         )
 
-        images = []
-        for i in indices:
-            ds = datasets[i]
+        candidate_zs = _candidate_overlap_slices(int(group.z.min()), int(group.z.max()))
 
-            # Downsample if necessary
-            yx_res = get_store_attributes(ds)['resolution'][-1]
-            target_scale = yx_res/target_res
-            img, _ = find_ref_slice(ds, z - z_offsets[i, 0]) # Could be better by accounting for gaps
-            images.append(resample(img, target_scale))
-
-        # Test images and store valid matches
+        # Test images and store valid matches.  A single slice can be blank, damaged,
+        # or otherwise feature-poor, so try a small set of representative slices
+        # before deciding that two XY-overlapping datasets cannot be fused.
         G = nx.Graph()
-        for i, j in combinations(range(len(images)), 2):
-            valid_estimate = estimate_transform_sift(images[i], images[j], scale, refine_estimate=True)[3]
+        for i, j in combinations(range(len(indices)), 2):
+            valid_estimate, matched_z, metrics = _has_valid_xy_overlap(
+                datasets[indices[i]],
+                datasets[indices[j]],
+                int(z_offsets[indices[i], 0]),
+                int(z_offsets[indices[j], 0]),
+                candidate_zs,
+                target_res,
+                scale,
+            )
             if valid_estimate:
                 G.add_edge(indices[i], indices[j])
-                logging.info('Valid XY overlap: %s <-> %s', dataset_names[indices[i]], dataset_names[indices[j]])
+                logging.info(
+                    'Valid XY overlap: %s <-> %s (matched z=%s%s)',
+                    dataset_names[indices[i]],
+                    dataset_names[indices[j]],
+                    matched_z,
+                    _format_sift_metrics(metrics),
+                )
             else:
-                logging.warning('No valid XY overlap: %s <-> %s', dataset_names[indices[i]], dataset_names[indices[j]])
+                logging.warning(
+                    'No valid XY overlap: %s <-> %s (tested z=%s%s)',
+                    dataset_names[indices[i]],
+                    dataset_names[indices[j]],
+                    candidate_zs,
+                    _format_sift_metrics(metrics),
+                )
 
         # Valid matches are chained in case there are more than 2 matches for a range
         matched_indices = set(G.nodes)
