@@ -39,8 +39,12 @@ Extract relative tile positions formatted as (y, x) from imagelist metadata file
 
     Resulting grid shape:
 
-    "tiles\\g0000\\t0000\\<project>_g0000_t0000_s00000.tif": (0, 1),
-    "tiles\\g0000\\t0001\\<project>_g0000_t0001_s00000.tif": (0, 2),
+    "tiles\\g0000\\t0000\\<project>_g0000_t0000_s00000.tif": (0, 0),
+    "tiles\\g0000\\t0001\\<project>_g0000_t0001_s00000.tif": (0, 1),
     "tiles\\g0001\\t0000\\<project>_g0001_t0000_s00000.tif": (1, 0)
+
+    X coordinates from different grids can be shifted slightly even when tiles belong to the same visual column.
+    Columns are therefore estimated from the horizontal pitch between tiles in the same row instead of assigning every
+    distinct X coordinate to a separate column.
 
 

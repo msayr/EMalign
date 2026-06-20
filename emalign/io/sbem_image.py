@@ -229,6 +229,30 @@ def _lookup_keys(path):
     return keys
 
 
+def _estimate_axis_pitch(sorted_coordinate_groups):
+    """Estimate the regular tile pitch from coordinates that share an axis.
+
+    SBEM Image records physical stage coordinates, so corresponding columns in
+    different grids can be slightly shifted.  Only distances between tiles that
+    share the same row reliably describe the horizontal tile pitch.
+    """
+
+    diffs = []
+
+    for coords in sorted_coordinate_groups:
+        coords = list(coords)
+
+        if len(coords) < 2:
+            continue
+
+        diffs.extend(b - a for a, b in zip(coords[:-1], coords[1:]) if b > a)
+
+    if not diffs:
+        return None
+
+    return sorted(diffs)[len(diffs) // 2]
+
+
 def _build_tile_yx_pos_map_from_imagelist(imagelist_path):
     entries = []
 
@@ -259,16 +283,33 @@ def _build_tile_yx_pos_map_from_imagelist(imagelist_path):
     if not entries:
         return {}
 
-    x_vals = sorted({x for _, _, _, x in entries})
     y_vals = sorted({y for _, _, y, _ in entries})
-
-    x_to_col = {x: i for i, x in enumerate(x_vals)}
     y_to_row = {y: i for i, y in enumerate(y_vals)}
+    row_to_xs = {
+        row: sorted({x for _, _, y, x in entries if y_to_row[y] == row})
+        for row in y_to_row.values()
+    }
+
+    x_pitch = _estimate_axis_pitch(row_to_xs.values())
+
+    if x_pitch is None:
+        x_vals = sorted({x for _, _, _, x in entries})
+        x_to_col = {x: i for i, x in enumerate(x_vals)}
+        entry_cols = {fname: x_to_col[x] for fname, _, _, x in entries}
+    else:
+        ref_row = min(row_to_xs, key=lambda row: min(row_to_xs[row]))
+        ref_x = min(row_to_xs[ref_row])
+        entry_cols = {
+            fname: int(round((x - ref_x) / x_pitch))
+            for fname, _, _, x in entries
+        }
+        min_col = min(entry_cols.values())
+        entry_cols = {fname: col - min_col for fname, col in entry_cols.items()}
 
     tile_map = {}
 
     for fname, tile_key, y, x in entries:
-        pos = (y_to_row[y], x_to_col[x])
+        pos = (y_to_row[y], entry_cols[fname])
         tile_map[fname] = pos
 
         if tile_key is not None:
