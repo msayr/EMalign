@@ -3,6 +3,7 @@ import logging
 import networkx as nx
 import numpy as np
 import os
+from datetime import UTC, datetime
 import pandas as pd
 
 from concurrent import futures
@@ -214,6 +215,28 @@ def check_stacks_to_invert(stack_list,
 
 
 # FUSE STACKS
+def _flatten_unique_indices(index_lists):
+    """Return sorted unique dataset indices from a pandas object column of lists."""
+
+    return sorted({int(i) for indices in index_lists for i in indices})
+
+
+def _write_fuse_config_diagnostics(main_config_path, diagnostics):
+    """Write human-readable diagnostics for fuse config discovery."""
+
+    output_dir = os.path.dirname(os.path.abspath(main_config_path))
+    diagnostics_path = os.path.join(output_dir, 'fuse_xy_diagnostics.json')
+
+    with open(diagnostics_path, 'w') as f:
+        json.dump(diagnostics, f, indent=2, default=str)
+
+    return diagnostics_path
+
+
+def _dataset_debug_name(dataset):
+    return os.path.basename(os.path.abspath(dataset.kvstore.path))
+
+
 def create_configs_fused_stacks(main_config_path,
                                 scale = 0.1
                                 ):
@@ -238,9 +261,34 @@ def create_configs_fused_stacks(main_config_path,
 
     # Test overlap and create fused config in consequence
     fused_configs = []
-    for _, group in df.groupby('group'):
-        z = group.z.min()
-        indices = np.unique(group.ds_indices.to_numpy())[0]
+    diagnostics = {
+        'timestamp': datetime.now(UTC).isoformat(),
+        'main_config_path': os.path.abspath(main_config_path),
+        'scale': scale,
+        'target_resolution': target_res,
+        'dataset_count': len(datasets),
+        'groups': [],
+    }
+
+    for group_id, group in df.groupby('group'):
+        z = int(group.z.min())
+        indices = _flatten_unique_indices(group.ds_indices)
+        group_record = {
+            'group': int(group_id),
+            'zmin': z,
+            'zmax': int(group.z.max()) + 1,
+            'dataset_indices': indices,
+            'dataset_paths': [datasets[i].kvstore.path for i in indices],
+            'dataset_names': [_dataset_debug_name(datasets[i]) for i in indices],
+            'pairwise_sift': [],
+            'created_configs': [],
+        }
+
+        if len(indices) < 2:
+            group_record['status'] = 'skipped_single_dataset'
+            group_record['reason'] = 'Only one dataset is present in this Z range.'
+            diagnostics['groups'].append(group_record)
+            continue
 
         images = []
         for i in indices:
@@ -254,13 +302,51 @@ def create_configs_fused_stacks(main_config_path,
 
         # Test images and store valid matches
         G = nx.Graph()
+        G.add_nodes_from(indices)
         for i, j in combinations(range(len(images)), 2):
-            valid_estimate = estimate_transform_sift(images[i], images[j], scale, refine_estimate=True)[3]
-            if valid_estimate:
-                G.add_edge(indices[i], indices[j])
+            pair_record = {
+                'dataset_indices': [indices[i], indices[j]],
+                'dataset_names': [
+                    _dataset_debug_name(datasets[indices[i]]),
+                    _dataset_debug_name(datasets[indices[j]]),
+                ],
+            }
+            try:
+                *_, valid_estimate, metrics = estimate_transform_sift(
+                    images[i],
+                    images[j],
+                    scale,
+                    refine_estimate=True,
+                )
+                pair_record['valid_estimate'] = bool(valid_estimate)
+                pair_record['robustness_metrics'] = metrics
+                if valid_estimate:
+                    G.add_edge(indices[i], indices[j])
+            except Exception as exc:
+                pair_record['valid_estimate'] = False
+                pair_record['error_type'] = type(exc).__name__
+                pair_record['error'] = str(exc)
+            group_record['pairwise_sift'].append(pair_record)
+
+        connected_components = [sorted(cc) for cc in nx.connected_components(G) if len(cc) > 1]
+        if not connected_components:
+            connected_components = [indices]
+            group_record['status'] = 'fallback_z_overlap_without_valid_sift'
+            group_record['reason'] = (
+                'No pair passed the SIFT robustness threshold during fuse config discovery. '
+                'A fallback config was created for all datasets in this Z-overlap group so '
+                'the stitch step can run and report per-slice load/stitch diagnostics.'
+            )
+            logging.warning(
+                'No valid SIFT pair found while discovering fuse configs for z=%s-%s; '
+                'creating fallback fuse config for %s. See fuse_xy_diagnostics.json.',
+                z, int(group.z.max()) + 1, group_record['dataset_names'],
+            )
+        else:
+            group_record['status'] = 'created_from_valid_sift_components'
 
         # Valid matches are chained in case there are more than 2 matches for a range
-        for cc in nx.connected_components(G):
+        for cc in connected_components:
             config = {
                 'dataset_paths': [datasets[i].kvstore.path for i in cc], 
                 'z_offsets': [int(z_offsets[i,0]) for i in cc],
@@ -268,4 +354,16 @@ def create_configs_fused_stacks(main_config_path,
                 'zmax': int(group.z.max()) + 1 # Exclusive max
                 } 
             fused_configs.append(config)
+            group_record['created_configs'].append(config)
+
+        diagnostics['groups'].append(group_record)
+
+    diagnostics_path = _write_fuse_config_diagnostics(main_config_path, diagnostics)
+    if not fused_configs:
+        logging.warning(
+            'No fuse configurations were created. See diagnostics at %s for skipped groups and SIFT results.',
+            diagnostics_path,
+        )
+    else:
+        logging.info('Wrote fuse configuration diagnostics to %s', diagnostics_path)
     return fused_configs

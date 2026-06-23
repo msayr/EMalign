@@ -79,7 +79,7 @@ def test_parse_tile_position_uses_imagelist_tile_key_for_all_slices(tmp_path):
         project / "tiles" / "g0001" / "t0000" / "sample_g0001_t0000_s00001.tif"
     )
 
-    assert sbem_image.parse_yx_pos_from_name(upper_slice) == (0, 1)
+    assert sbem_image.parse_yx_pos_from_name(upper_slice) == (0, 0)
     assert sbem_image.parse_yx_pos_from_name(other_tile) == (1, 0)
     assert (
         sbem_image.parse_slice_from_name(
@@ -87,6 +87,57 @@ def test_parse_tile_position_uses_imagelist_tile_key_for_all_slices(tmp_path):
         )
         == 1
     )
+
+
+def test_parse_tile_position_treats_shifted_grid_as_same_column(tmp_path):
+    _reset_cache()
+    project = tmp_path / "shifted"
+    logs = project / "meta" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "imagelist_20260206.txt").write_text(
+        "\n".join(
+            [
+                r"tiles\g0000\t0000\Overwrite_error_20260206_g0000_t0000_s00854.tif;-638823;-625831;42699;854",
+                r"tiles\g0000\t0001\Overwrite_error_20260206_g0000_t0001_s00854.tif;-449023;-625831;42699;854",
+                r"tiles\g0001\t0000\Overwrite_error_20260206_g0001_t0000_s00854.tif;-679384;-494119;42699;854",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    for grid, tile in [(0, 0), (0, 1), (1, 0)]:
+        tile_dir = project / "tiles" / f"g{grid:04d}" / f"t{tile:04d}"
+        tile_dir.mkdir(parents=True)
+        (
+            tile_dir
+            / f"Overwrite_error_20260206_g{grid:04d}_t{tile:04d}_s00854.tif"
+        ).touch()
+
+    upper_left = (
+        project
+        / "tiles"
+        / "g0000"
+        / "t0000"
+        / "Overwrite_error_20260206_g0000_t0000_s00854.tif"
+    )
+    upper_right = (
+        project
+        / "tiles"
+        / "g0000"
+        / "t0001"
+        / "Overwrite_error_20260206_g0000_t0001_s00854.tif"
+    )
+    lower_shifted = (
+        project
+        / "tiles"
+        / "g0001"
+        / "t0000"
+        / "Overwrite_error_20260206_g0001_t0000_s00854.tif"
+    )
+
+    assert sbem_image.parse_yx_pos_from_name(upper_left) == (0, 0)
+    assert sbem_image.parse_yx_pos_from_name(upper_right) == (0, 1)
+    assert sbem_image.parse_yx_pos_from_name(lower_shifted) == (1, 0)
 
 
 def test_sbem_stack_name_includes_grid_and_tile(tmp_path):
