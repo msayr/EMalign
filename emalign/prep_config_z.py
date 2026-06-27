@@ -19,7 +19,7 @@ from glob import glob
 from typing import List, Optional
 
 from emalign.align_z.config import add_config_metadata, validate_config_directory, CONFIG_VERSION
-from emalign.align_z.utils import compute_alignment_path, determine_initial_offset, determine_initial_offset_ref, get_ordered_datasets
+from emalign.align_z.utils import compute_alignment_path, determine_initial_offset, determine_initial_offset_ref, get_dataset_names, get_ordered_datasets
 from emalign.io.store import get_store_attributes
 
 logging.basicConfig(level=logging.INFO)
@@ -159,13 +159,15 @@ def create_alignment_configs(datasets, z_offsets, output_configs_dir, config_z, 
     with open(os.path.join(output_configs_dir, '00_align_plan.json'), 'w') as f:
         json.dump(align_plan, f, indent=2)
 
+    dataset_names = get_dataset_names(datasets)
+
     # Write configs for each dataset
     done = []
     for i, (path, order) in enumerate(zip(paths, reverse_order)):
         for dataset_name in path:
             if dataset_name in done:
                 continue
-            idx = [os.path.basename(os.path.abspath(d.kvstore.path)) == dataset_name for d in datasets].index(True)
+            idx = dataset_names.index(dataset_name)
             dataset = datasets[idx]
             z_offset = int(z_offsets[idx, 0]) + ds_bounds[dataset_name][0]
             config_path = os.path.join(output_configs_dir, f'z_{dataset_name}.json')
@@ -189,7 +191,7 @@ def create_alignment_configs(datasets, z_offsets, output_configs_dir, config_z, 
                 # in this alignment path. Determined from the predecessor's stored
                 # z_offset and shape 
                 predecessor = path[path.index(dataset_name) - 1]
-                pred_idx = [os.path.basename(os.path.abspath(d.kvstore.path)) == predecessor for d in datasets].index(True)
+                pred_idx = dataset_names.index(predecessor)
                 first_slice = int(z_offsets[pred_idx, 0]) + ds_bounds[predecessor][1] - 1
                 xy_offset = [0, 0]
                 bbox_ref = None
@@ -305,9 +307,10 @@ def prep_config_z(project_dir: str,
     
     # Print dataset info
     logging.info('Datasets Z offsets:')
-    for dataset, z in zip(datasets, z_offsets):
+    dataset_names = get_dataset_names(datasets)
+    for dataset, dataset_name, z in zip(datasets, dataset_names, z_offsets):
         yx_res = get_store_attributes(dataset)['resolution'][1:]
-        logging.info(f'    {z[0]} (res: {yx_res}): {os.path.basename(os.path.abspath(dataset.kvstore.path))}')
+        logging.info(f'    {z[0]} (res: {yx_res}): {dataset_name}')
 
     if isinstance(yx_target_resolution, list):
         yx_target_resolution = np.min(yx_target_resolution, axis=0).tolist()
