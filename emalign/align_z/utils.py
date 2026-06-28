@@ -285,18 +285,38 @@ def compute_alignment_path(datasets,
                     # Keep track of everything, mostly for debugging
                     G.add_edge(u,v, M=M, out_shape=out_shape, ref_offset=ref_offset, valid_estimate=valid_estimate)
 
-    if not nx.is_connected(G):
-        # Some datasets are disconnected from the main alignment path
-        x = [[dataset_names[i] for i in cc] for cc in nx.connected_components(G)]
-        raise RuntimeError(f'Some datasets are isolated: \n{x}')
-
     paths = extract_paths_from_root(G, root_node_idx)
     if not paths:
-        # Root is the only effective dataset after graph construction (e.g. all others were
-        # filtered as fused sub-datasets).  Treat it as a single-stack project.
-        logging.warning(f'No alignment paths found from root "{root_node}"; treating it as the sole dataset.')
-        ds_bounds = {root_node: (0, datasets_nomask[root_node_idx].shape[0])}
-        return root_node, [[root_node]], [False], ds_bounds
+        # SIFT may fail to produce a graph edge for consecutive stack configs,
+        # especially when there is no Z overlap and the intended comparison is
+        # simply the last slice of one stack against the first slice of the next.
+        # Do not silently collapse such multi-stack inputs to the root stack:
+        # preserve the Z order so prep_config_z writes one config per stack.
+        ordered_nodes = [root_node_idx] + [
+            i for i in sorted(G.nodes, key=lambda j: (z_offsets[j, 0], j))
+            if i != root_node_idx
+        ]
+        paths = [ordered_nodes]
+        logging.warning(
+            'No SIFT-validated alignment paths found from root "%s"; '
+            'falling back to Z-offset order: %s',
+            root_node,
+            [dataset_names[i] for i in ordered_nodes]
+        )
+
+    if not nx.is_connected(G):
+        # Some datasets are disconnected in the SIFT graph. Keep generating a
+        # complete alignment plan in Z order instead of dropping later stacks.
+        components = [[dataset_names[i] for i in cc] for cc in nx.connected_components(G)]
+        logging.warning(
+            'Some datasets are disconnected in the SIFT graph; '
+            'falling back to Z-offset order. Components: %s',
+            components
+        )
+        paths = [[root_node_idx] + [
+            i for i in sorted(G.nodes, key=lambda j: (z_offsets[j, 0], j))
+            if i != root_node_idx
+        ]]
 
     reverse_z = [bool(z_offsets[p[0], 0] > z_offsets[p[-1], 0]) for p in paths]
     paths = [[dataset_names[i] for i in p] for p in paths]
