@@ -263,6 +263,7 @@ def prep_config_z(project_dir: str,
         if not os.path.exists(config_paths[0]):
             raise FileNotFoundError(f'Main config file not found in the project directory: {config_paths[0]}')
         logging.info(f'Config file location was determined from project directory:\n{config_paths[0]}\n')
+    using_multiple_xy_configs = len(config_paths) > 1
 
     # Check if output directory already has configs
     output_configs_dir = os.path.join(project_dir, 'config', 'z_config')
@@ -289,6 +290,14 @@ def prep_config_z(project_dir: str,
     (datasets, z_offsets, yx_target_resolution,
      project_name, mongodb_config_filepath, xy_output_path) = load_configs_from_files(
         config_paths, exclude)
+
+    if using_multiple_xy_configs:
+        project_name = os.path.basename(os.path.abspath(project_dir))
+        xy_output_path = project_dir
+        logging.info(
+            'Multiple XY configs supplied; using project directory name '
+            f'"{project_name}" for Z project and destination.'
+        )
 
     # Determine destination path
     if destination_path is None:
