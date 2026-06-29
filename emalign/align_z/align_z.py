@@ -135,13 +135,14 @@ def _compute_flow(dataset,
                   transformations=None,
                   bbox_ref=None,
                   bbox_anchor=None,
+                  dataset_name=None,
                   z_offset=0):
     
     original_shape = dataset.shape if original_shape is None else original_shape
 
     #---------- Resolve paths and mask ----------#
     dataset_path = os.path.abspath(dataset.kvstore.path)
-    dataset_name = os.path.basename(dataset_path)
+    dataset_name = dataset_name or os.path.basename(dataset_path)
     if dataset_mask is None:
         ds_mask_path = dataset_path + '_mask'
         if os.path.exists(ds_mask_path):
@@ -444,9 +445,10 @@ def compute_flow_dataset(dataset,
                          ref_slice_mask=None,
                          target_scale=1,
                          ref_scale=1,
+                         dataset_name=None,
                          z_offset=0):
 
-    dataset_name = os.path.basename(os.path.abspath(dataset.kvstore.path))
+    dataset_name = dataset_name or os.path.basename(os.path.abspath(dataset.kvstore.path))
     flow, transform, bbox_ref, bbox_anchor = _compute_flow(dataset=dataset,
                                                             original_shape=original_shape,
                                                             ignore_slices=ignore_slices,
@@ -462,6 +464,7 @@ def compute_flow_dataset(dataset,
                                                             ref_slice_mask=ref_slice_mask,
                                                             bbox_ref=bbox_ref,
                                                             bbox_anchor=bbox_anchor,
+                                                            dataset_name=dataset_name,
                                                             db=db,
                                                             z_offset=z_offset)
     assert not np.isnan(flow).all()
@@ -487,6 +490,7 @@ def compute_flow_dataset(dataset,
                                      transformations=ds_transform,
                                      bbox_ref=ds_bbox_ref,
                                      bbox_anchor=ds_bbox_anchor,
+                                     dataset_name=dataset_name,
                                      db=db,
                                      z_offset=z_offset)
     assert not np.isnan(ds_flow).all()

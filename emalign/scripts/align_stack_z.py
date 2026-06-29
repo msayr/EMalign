@@ -221,6 +221,7 @@ def align_stack_z(destination_path,
                                                      ref_slice_mask=ref_slice_mask,
                                                      target_scale=target_scale,
                                                      ref_scale=ref_scale,
+                                                     dataset_name=dataset_name,
                                                      z_offset=z_offset)
 
     #---------- Compute mesh ----------#

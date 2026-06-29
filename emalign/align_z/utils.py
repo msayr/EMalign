@@ -18,6 +18,48 @@ from ..io.store import get_store_attributes
 from ..arrays.sift import estimate_transform_sift
 
 
+def get_dataset_names(datasets):
+    '''Return stable, unique names for TensorStore datasets.
+
+    XY intermediate datasets from separate stack configs can share the same leaf
+    name (for example, both stacks may contain ``01_g0000_t0000``). Z-alignment
+    plans and per-dataset config files are keyed by dataset name, so duplicate
+    leaf names would collapse distinct stacks into one entry. Keep the legacy
+    leaf name when it is already unique; otherwise prefix it with the containing
+    zarr directory name and finally an index if needed.
+    '''
+    paths = [os.path.abspath(d.kvstore.path) for d in datasets]
+    leaf_names = [os.path.basename(path) for path in paths]
+    duplicate_leaf_names = {name for name in leaf_names if leaf_names.count(name) > 1}
+
+    names = []
+    used = set()
+    for idx, path in enumerate(paths):
+        leaf_name = leaf_names[idx]
+        if leaf_name in duplicate_leaf_names:
+            parts = path.split(os.sep)
+            try:
+                xy_idx = parts.index('xy_intermediate')
+                prefix = parts[xy_idx - 1] if xy_idx > 0 else os.path.basename(os.path.dirname(path))
+            except ValueError:
+                prefix = os.path.basename(os.path.dirname(path))
+            name = f'{prefix}__{leaf_name}'
+        else:
+            name = leaf_name
+
+        if name in used:
+            base = name
+            suffix = 2
+            while f'{base}__{suffix}' in used:
+                suffix += 1
+            name = f'{base}__{suffix}'
+
+        names.append(name)
+        used.add(name)
+
+    return names
+
+
 def get_ordered_datasets(config_paths, exclude=[]):
     '''Open and order datastacks based on Z offset.
 
@@ -169,7 +211,8 @@ def compute_alignment_path(datasets,
             datasets_nomask.append(d)
 
     if len(datasets_nomask) == 1:
-        root_node = os.path.basename(os.path.abspath(datasets_nomask[0].kvstore.path))
+        dataset_names = get_dataset_names(datasets_nomask)
+        root_node = dataset_names[0]
         ds_bounds = {root_node: (0, datasets_nomask[0].shape[0])}
         return root_node, [[root_node]], [False], ds_bounds
 
@@ -182,6 +225,8 @@ def compute_alignment_path(datasets,
         img = find_ref_slice(store, z, reverse=reverse)[0]
         return resample(img, target_scale)
     
+    dataset_names = get_dataset_names(datasets_nomask)
+
     # Find all ranges over which there is overlap
     z_ranges = [np.arange(z[0], z[0] + ds.shape[0]) for z, ds in zip(z_offsets, datasets_nomask)]
     unique_slices = sorted(np.unique(np.concatenate(z_ranges)).tolist())
@@ -216,7 +261,7 @@ def compute_alignment_path(datasets,
         raise RuntimeError('No potential root dataset was found: no dataset with no overlap along Z.')
 
     root_node_idx = root_datasets.iloc[0][0]
-    root_node = os.path.basename(os.path.abspath(datasets_nomask[root_node_idx].kvstore.path))
+    root_node = dataset_names[root_node_idx]
 
     # Compute valid alignment paths
     G = nx.Graph()
@@ -240,28 +285,48 @@ def compute_alignment_path(datasets,
                     # Keep track of everything, mostly for debugging
                     G.add_edge(u,v, M=M, out_shape=out_shape, ref_offset=ref_offset, valid_estimate=valid_estimate)
 
-    if not nx.is_connected(G):
-        # Some datasets are disconnected from the main alignment path
-        x = [[os.path.basename(os.path.abspath(datasets_nomask[i].kvstore.path)) for i in cc] for cc in nx.connected_components(G)]
-        raise RuntimeError(f'Some datasets are isolated: \n{x}')
-
     paths = extract_paths_from_root(G, root_node_idx)
     if not paths:
-        # Root is the only effective dataset after graph construction (e.g. all others were
-        # filtered as fused sub-datasets).  Treat it as a single-stack project.
-        logging.warning(f'No alignment paths found from root "{root_node}"; treating it as the sole dataset.')
-        ds_bounds = {root_node: (0, datasets_nomask[root_node_idx].shape[0])}
-        return root_node, [[root_node]], [False], ds_bounds
+        # SIFT may fail to produce a graph edge for consecutive stack configs,
+        # especially when there is no Z overlap and the intended comparison is
+        # simply the last slice of one stack against the first slice of the next.
+        # Do not silently collapse such multi-stack inputs to the root stack:
+        # preserve the Z order so prep_config_z writes one config per stack.
+        ordered_nodes = [root_node_idx] + [
+            i for i in sorted(G.nodes, key=lambda j: (z_offsets[j, 0], j))
+            if i != root_node_idx
+        ]
+        paths = [ordered_nodes]
+        logging.warning(
+            'No SIFT-validated alignment paths found from root "%s"; '
+            'falling back to Z-offset order: %s',
+            root_node,
+            [dataset_names[i] for i in ordered_nodes]
+        )
+
+    if not nx.is_connected(G):
+        # Some datasets are disconnected in the SIFT graph. Keep generating a
+        # complete alignment plan in Z order instead of dropping later stacks.
+        components = [[dataset_names[i] for i in cc] for cc in nx.connected_components(G)]
+        logging.warning(
+            'Some datasets are disconnected in the SIFT graph; '
+            'falling back to Z-offset order. Components: %s',
+            components
+        )
+        paths = [[root_node_idx] + [
+            i for i in sorted(G.nodes, key=lambda j: (z_offsets[j, 0], j))
+            if i != root_node_idx
+        ]]
 
     reverse_z = [bool(z_offsets[p[0], 0] > z_offsets[p[-1], 0]) for p in paths]
-    paths = [[os.path.basename(os.path.abspath(datasets_nomask[i].kvstore.path)) for i in p] for p in paths]
+    paths = [[dataset_names[i] for i in p] for p in paths]
 
     # Datasets will need to be bounded to not re-use fused images
     ds_bounds = {}
     for i in np.unique(np.concatenate(df.ds_indices.to_numpy())):
         zmin = df.loc[df.ds_indices.apply(lambda l: i in l), 'z'].min() - z_offsets[i, 0]
         zmax = df.loc[df.ds_indices.apply(lambda l: i in l), 'z'].max() - z_offsets[i, 0] + 1  # Exclusive max
-        ds_bounds[os.path.basename(os.path.abspath(datasets_nomask[i].kvstore.path))] = (int(zmin), int(zmax))
+        ds_bounds[dataset_names[i]] = (int(zmin), int(zmax))
     return root_node, paths, reverse_z, ds_bounds
 
 
@@ -281,7 +346,7 @@ def determine_initial_offset(datasets, paths):
         np.ndarray: Array of shape (2,) with [y, x] offset to apply as padding at origin.
     '''
     if not isinstance(datasets, dict):
-        datasets = {os.path.basename(os.path.abspath(d.kvstore.path)): d for d in datasets}
+        datasets = {name: d for name, d in zip(get_dataset_names(datasets), datasets)}
     
     global_offset = np.array([0,0])
     pbar = tqdm(position=0,
