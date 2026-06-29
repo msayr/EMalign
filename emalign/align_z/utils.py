@@ -64,7 +64,8 @@ def get_ordered_datasets(config_paths, exclude=[]):
     '''Open and order datastacks based on Z offset.
 
     Args:
-        dataset_paths (list): List of paths to the datasets to open and order.
+        config_paths (list): List of paths to the config files containing datasets
+            to open and order. Nested lists are treated as a config group.
         exclude (list, optional): List of strings to find in paths. If the string is found, the path will be ignored. 
 
     Returns:
@@ -85,6 +86,7 @@ def get_ordered_datasets(config_paths, exclude=[]):
     offsets = []
     previous_offset = 0
     for config_group in config_groups:
+        group_datasets = []
         group_offsets = []
         z_shapes = []
         for config_path in config_group:
@@ -103,14 +105,52 @@ def get_ordered_datasets(config_paths, exclude=[]):
                 dataset = open_store(ds, mode='r')
                 z_shapes.append(dataset.shape[0])
 
-                offset = get_store_attributes(dataset)['voxel_offset']
-                offset[0] += previous_offset # Shift this dataset by the previous dataset's offset
+                offset = list(get_store_attributes(dataset)['voxel_offset'])
+                group_datasets.append(dataset)
                 group_offsets.append(offset)
-                offsets.append(offset)
-                dataset_stores.append(dataset)
+
+        if not group_offsets:
+            continue
+
+        group_offsets = np.array(group_offsets, dtype=int)
+        group_z_start = group_offsets[:, 0]
+        group_z_end = group_z_start + np.array(z_shapes)
+
+        # Config groups are commonly either:
+        #   1. local stacks whose Z offsets should be concatenated after the
+        #      previous group, or
+        #   2. stacks that already carry global Z offsets from an upstream prep.
+        #
+        # Older behavior always added previous_offset, which double-counted
+        # already-global offsets (e.g. stack2 offset 531 became 1062 after a
+        # 531-slice stack1).  Treat a non-first group as already global when
+        # its raw Z range reaches the current global cursor; otherwise, shift it
+        # after the previous group.
+        group_is_already_global = (
+            previous_offset > 0 and (
+                group_z_start.min() >= previous_offset or
+                group_z_end.max() > previous_offset
+            )
+        )
+        if group_is_already_global:
+            adjusted_offsets = group_offsets.copy()
+            logging.info(
+                'Preserving global Z offsets for config group %s; raw Z range '
+                '[%s, %s) already reaches current cursor %s.',
+                config_group,
+                int(group_z_start.min()),
+                int(group_z_end.max()),
+                int(previous_offset)
+            )
+        else:
+            adjusted_offsets = group_offsets.copy()
+            adjusted_offsets[:, 0] += previous_offset
+
+        offsets.extend(adjusted_offsets.tolist())
+        dataset_stores.extend(group_datasets)
 
         # If configs are supposed to be consecutive stacks, the offsets should match that
-        previous_offset = np.array(group_offsets)[:,0].max() + z_shapes[np.array(group_offsets)[:,0].argmax()]
+        previous_offset = int(np.max(adjusted_offsets[:, 0] + np.array(z_shapes)))
 
     offsets = np.array(offsets)
 
