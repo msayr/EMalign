@@ -45,6 +45,7 @@ def prep_align_stacks(main_dir,
                       num_workers,
                       port,
                       io_mode='volumescope',
+                      use_sbem_stage_positions=False,
                       project_name=None,
                       force_overwrite=False):
     from emalign.align_xy.prep import (
@@ -53,6 +54,9 @@ def prep_align_stacks(main_dir,
         get_stacks,
     )
     from emalign.io.backend import get_io_backend
+
+    if use_sbem_stage_positions and io_mode != 'sbem_image':
+        raise ValueError('--use-sbem-stage-positions can only be used with --mode sbem_image')
 
     io_backend = get_io_backend(io_mode)
     
@@ -175,7 +179,8 @@ def prep_align_stacks(main_dir,
                 'stride': stride,
                 'apply_gaussian': apply_gaussian,
                 'apply_clahe': apply_clahe,
-                'io_mode': io_mode
+                'io_mode': io_mode,
+                'use_sbem_stage_positions': use_sbem_stage_positions
                 }
 
     with open(os.path.join(config_dir, 'main_config.json'), 'w') as f:
@@ -283,6 +288,11 @@ def main():
                         action='store_true',
                         default=False,
                         help='Force overwrite of existing config files. Default: user is prompted if configs exist')
+    parser.add_argument('--use-sbem-stage-positions',
+                        dest='use_sbem_stage_positions',
+                        action='store_true',
+                        default=False,
+                        help='Use SBEM Image x/y stage coordinates as the coarse XY tile-position prior. Only valid with --mode sbem_image.')
     parser.add_argument('--mode',
                         metavar='MODE',
                         dest='io_mode',

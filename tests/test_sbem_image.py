@@ -36,6 +36,7 @@ def _reset_cache():
     sbem_image._TILE_YX_POS = {}
     sbem_image._TILE_YX_SOURCE = None
     sbem_image._TILE_YX_PROJECT_ROOT = None
+    sbem_image._TILE_STAGE_POS = {}
 
 
 def test_backend_registration_exposes_sbem_image():
@@ -151,3 +152,17 @@ def test_sbem_stack_name_includes_grid_and_tile(tmp_path):
         sbem_image.get_stack_name(project / "tiles" / "g0001" / "t0000")
         == "g0001_t0000"
     )
+
+
+def test_stage_origins_are_available_by_tile_position(tmp_path):
+    _reset_cache()
+    project = _write_project(tmp_path)
+    tile_map_paths = {
+        (0, 0): project / "tiles" / "g0000" / "t0000" / "sample_g0000_t0000_s00001.tif",
+        (1, 0): project / "tiles" / "g0000" / "t0001" / "sample_g0000_t0001_s00001.tif",
+    }
+
+    assert sbem_image.get_stage_origins(tile_map_paths) == {
+        (0, 0): (-619022, -608632),
+        (1, 0): (-619022, -421332),
+    }

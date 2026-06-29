@@ -13,7 +13,8 @@ def get_coarse_offset(tile_map,
                       min_range=(10,100,0),
                       min_overlap=5,
                       filter_size=5,
-                      overlap_cap=500):
+                      overlap_cap=500,
+                      tile_origins=None):
     '''
     Compute coarse offset and mesh for initial rigid XY alignment
     '''
@@ -37,10 +38,42 @@ def get_coarse_offset(tile_map,
     cx[np.isinf(cx)] = np.nan
     cy[np.isinf(cy)] = np.nan
 
+    if tile_origins is not None:
+        cx, cy = _apply_tile_origin_offsets(cx, cy, tile_map, tile_origins)
+
     coarse_mesh = stitch_rigid.optimize_coarse_mesh(cx, cy)
 
     return cx, cy, coarse_mesh
             
+
+def _apply_tile_origin_offsets(cx, cy, tile_map, tile_origins):
+    """Replace neighbor offsets with metadata-derived tile origin deltas.
+
+    SOFIMA's coarse mesh stores displacement relative to a no-overlap regular
+    grid.  SBEM Image stage origins describe absolute tile origins, so adjacent
+    X links use ``dx - tile_width`` and adjacent Y links use ``dy - tile_height``.
+    """
+
+    tile_shape = next(iter(tile_map.values())).shape
+    height, width = tile_shape[:2]
+    cx = cx.copy()
+    cy = cy.copy()
+
+    for (x, y), (origin_y, origin_x) in tile_origins.items():
+        right = (x + 1, y)
+        if right in tile_origins:
+            right_y, right_x = tile_origins[right]
+            cx[0, 0, y, x] = right_x - origin_x - width
+            cx[1, 0, y, x] = right_y - origin_y
+
+        down = (x, y + 1)
+        if down in tile_origins:
+            down_y, down_x = tile_origins[down]
+            cy[0, 0, y, x] = down_x - origin_x
+            cy[1, 0, y, x] = down_y - origin_y - height
+
+    return cx, cy
+
 
 def get_elastic_mesh(tile_map, 
                      cx, 
