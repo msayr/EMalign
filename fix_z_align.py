@@ -69,6 +69,13 @@ def _global_to_local(config: dict, original_local_min: int, global_z: int) -> in
     return int(original_local_min) + int(global_z) - int(config.get('z_offset', 0))
 
 
+def _repair_global_z_for_local(config: dict, original_local_min: int, local_z: int) -> int:
+    """Map local z to the destination/global z that the repair should write."""
+    if config.get('_boundary_anchor_global') is not None:
+        return int(config['_boundary_anchor_global']) + 1 + int(local_z) - int(original_local_min)
+    return _global_z_for_local(config, original_local_min, local_z)
+
+
 def _load_json(path: str) -> dict:
     with open(path, 'r') as f:
         return json.load(f)
@@ -215,7 +222,7 @@ def _make_repair_config(base_config: dict, original_local_min: int, local_start:
     config.pop('_repair_local_override', None)
     config['local_z_min'] = int(local_start)
     config['local_z_max'] = int(local_stop_exclusive)
-    config['z_offset'] = _global_z_for_local(base_config, original_local_min, local_start)
+    config['z_offset'] = _repair_global_z_for_local(base_config, original_local_min, local_start)
     config['first_slice'] = int(boundary_anchor_global) if boundary_anchor_global is not None else config['z_offset'] - 1
     config['overwrite'] = True
     config['wipe_progress_flag'] = False
@@ -352,7 +359,7 @@ def repair_z_alignment(config_path: str,
     dataset_name = base_config['dataset_name']
     original_min, original_max = _stack_bounds(base_config)
     repair_start, repair_end = _normalize_slice_range(base_config, original_min, original_max, slice_range)
-    start_global = _global_z_for_local(base_config, original_min, repair_start)
+    start_global = _repair_global_z_for_local(base_config, original_min, repair_start)
     LOGGER.info(
         'Interpreting requested global slice range %d:%d -> local z %d:%d in %s.',
         slice_range[0],
@@ -372,7 +379,7 @@ def repair_z_alignment(config_path: str,
     if not skip_preview:
         LOGGER.info('Realigning requested local z range [%d, %d) for %s.', repair_start, preview_stop, dataset_name)
         preview_config = _make_repair_config(base_config, original_min, repair_start, preview_stop)
-        preview_stop_global = _global_z_for_local(base_config, original_min, preview_stop - 1) + 1
+        preview_stop_global = _repair_global_z_for_local(base_config, original_min, preview_stop - 1) + 1
         preview_output_snapshots = _snapshot_preview_outputs(base_config, start_global, preview_stop_global)
         preview_progress_docs = _delete_progress_suffix(db, dataset_name, repair_start, start_global, include_mesh=True)
         preview_attrs = _force_stack_unprocessed(preview_config)
@@ -385,7 +392,7 @@ def repair_z_alignment(config_path: str,
             raise
 
         inspect_min = max(0, start_global - 2)
-        inspect_max = _global_z_for_local(base_config, original_min, preview_stop - 1) + max(3, preview_after + 1)
+        inspect_max = _repair_global_z_for_local(base_config, original_min, preview_stop - 1) + max(3, preview_after + 1)
         LOGGER.info('Opening Neuroglancer for destination slices [%d, %d).', inspect_min, inspect_max)
         inspect_dataset(base_config['destination_path'],
                         bounding_box=[inspect_min, inspect_max],
