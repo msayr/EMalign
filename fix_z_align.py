@@ -91,7 +91,7 @@ def _is_align_plan(config: dict) -> bool:
 
 
 def _config_for_global_range(config_path: str, slice_range: Tuple[int, int]) -> dict:
-    """Load the stack config containing an inclusive global slice range."""
+    """Load the stack config containing, or anchored by, an inclusive global slice range."""
     config = _load_json(config_path)
     if not _is_align_plan(config):
         return config
@@ -107,14 +107,46 @@ def _config_for_global_range(config_path: str, slice_range: Tuple[int, int]) -> 
             matches.append((global_min, dataset_name, dataset_config))
 
     if not matches:
+        boundary_matches = []
+        for dataset_name, dataset_config in dataset_configs.items():
+            first_slice = dataset_config.get('first_slice')
+            if first_slice is None:
+                continue
+            first_slice = int(first_slice)
+            if start == first_slice and end >= start:
+                local_min, local_max = _stack_bounds(dataset_config)
+                repair_end = min(local_max - 1, local_min + max(0, end - start - 1))
+                boundary_config = copy.deepcopy(dataset_config)
+                boundary_config['_boundary_anchor_global'] = first_slice
+                boundary_config['_repair_local_override'] = (local_min, repair_end)
+                boundary_matches.append((first_slice, dataset_name, boundary_config))
+
+        if boundary_matches:
+            boundary_matches.sort()
+            selected = boundary_matches[0][2]
+            LOGGER.info(
+                'Selected stack config %s from align plan because requested range %d:%d starts at its previous-stack anchor slice %d.',
+                selected.get('_config_path', selected['dataset_name']),
+                start,
+                end,
+                selected['_boundary_anchor_global'],
+            )
+            return selected
+
         ranges = []
+        anchors = []
         for dataset_name, dataset_config in sorted(dataset_configs.items()):
             local_min, local_max = _stack_bounds(dataset_config)
             global_min, global_max = _global_bounds(dataset_config, local_min, local_max)
             ranges.append(f'{dataset_name}=[{global_min}, {global_max})')
+            if dataset_config.get('first_slice') is not None:
+                anchors.append(f'{dataset_name} anchors to previous global slice {int(dataset_config["first_slice"])}')
         raise ValueError(
             f'Global repair range {start}:{end} is not fully contained in one stack from {config_path}. '
-            f'Available global ranges: {"; ".join(ranges)}'
+            f'Available global ranges: {"; ".join(ranges)}. '
+            f'Available between-stack anchors: {"; ".join(anchors) if anchors else "none"}. '
+            'For a boundary repair, pass PREVIOUS_SLICE:FIRST_BAD_SLICE, where PREVIOUS_SLICE '
+            'matches the successor stack first_slice anchor.'
         )
 
     matches.sort()
@@ -125,6 +157,9 @@ def _config_for_global_range(config_path: str, slice_range: Tuple[int, int]) -> 
 
 def _normalize_slice_range(config: dict, original_local_min: int, original_local_max: int, slice_range: Tuple[int, int]) -> Tuple[int, int]:
     """Return a local inclusive range from an inclusive destination/global z range."""
+    if '_repair_local_override' in config:
+        return tuple(config['_repair_local_override'])
+
     start, end = slice_range
     global_min, global_max_exclusive = _global_bounds(config, original_local_min, original_local_max)
     if global_min <= start <= end < global_max_exclusive:
@@ -175,6 +210,8 @@ def _make_repair_config(base_config: dict, original_local_min: int, local_start:
     """Build an align_stack_z config for a suffix/subrange starting at local_start."""
     config = copy.deepcopy(base_config)
     config.pop('_config_path', None)
+    config.pop('_boundary_anchor_global', None)
+    config.pop('_repair_local_override', None)
     config['local_z_min'] = int(local_start)
     config['local_z_max'] = int(local_stop_exclusive)
     config['z_offset'] = _global_z_for_local(base_config, original_local_min, local_start)
