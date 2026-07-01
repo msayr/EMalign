@@ -209,13 +209,14 @@ def _restore_progress_suffix(db, dataset_name: str, start_local: int, start_glob
 def _make_repair_config(base_config: dict, original_local_min: int, local_start: int, local_stop_exclusive: int) -> dict:
     """Build an align_stack_z config for a suffix/subrange starting at local_start."""
     config = copy.deepcopy(base_config)
+    boundary_anchor_global = config.get('_boundary_anchor_global')
     config.pop('_config_path', None)
     config.pop('_boundary_anchor_global', None)
     config.pop('_repair_local_override', None)
     config['local_z_min'] = int(local_start)
     config['local_z_max'] = int(local_stop_exclusive)
     config['z_offset'] = _global_z_for_local(base_config, original_local_min, local_start)
-    config['first_slice'] = config['z_offset'] - 1
+    config['first_slice'] = int(boundary_anchor_global) if boundary_anchor_global is not None else config['z_offset'] - 1
     config['overwrite'] = True
     config['wipe_progress_flag'] = False
     return config
@@ -291,7 +292,6 @@ def _restore_store_range(snapshot: Optional[dict]) -> None:
 
     store = open_store(snapshot['path'], mode='r+', dtype=snapshot['dtype'])
     store = store.resize(
-        inclusive_min=snapshot['inclusive_min'],
         exclusive_max=snapshot['exclusive_max'],
     ).result()
     if snapshot['data'] is not None:
