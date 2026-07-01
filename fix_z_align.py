@@ -49,6 +49,28 @@ def _global_z_for_local(config: dict, original_local_min: int, local_z: int) -> 
     return int(config.get('z_offset', 0)) + int(local_z) - int(original_local_min)
 
 
+def _normalize_slice_range(config: dict, original_local_min: int, original_local_max: int, slice_range: Tuple[int, int]) -> Tuple[int, int, str]:
+    """Return a local inclusive range, accepting either local or destination/global z values."""
+    start, end = slice_range
+    if original_local_min <= start <= end < original_local_max:
+        return start, end, 'local'
+
+    global_min = _global_z_for_local(config, original_local_min, original_local_min)
+    global_max_exclusive = _global_z_for_local(config, original_local_min, original_local_max)
+    if global_min <= start <= end < global_max_exclusive:
+        return (
+            original_local_min + start - global_min,
+            original_local_min + end - global_min,
+            'global',
+        )
+
+    raise ValueError(
+        f'Repair range {start}:{end} is outside both local stack bounds '
+        f'[{original_local_min}, {original_local_max}) and destination/global bounds '
+        f'[{global_min}, {global_max_exclusive}).'
+    )
+
+
 def _delete_progress_suffix(db, dataset_name: str, start_local: int, start_global: int, *, include_mesh: bool) -> None:
     """Remove cached progress docs that would otherwise cause suffix repair to be skipped."""
     collection = db[dataset_name]
@@ -101,14 +123,22 @@ def repair_z_alignment(config_path: str,
 
     dataset_name = base_config['dataset_name']
     original_min, original_max = _stack_bounds(base_config)
-    repair_start, repair_end = slice_range
-    if repair_start < original_min or repair_end >= original_max:
-        raise ValueError(f'Repair range {repair_start}:{repair_end} is outside configured stack bounds [{original_min}, {original_max}).')
-    if repair_start == original_min and base_config.get('first_slice') is None and base_config.get('reference_path') is None:
-        raise ValueError('Cannot repair the first slice of a root stack because there is no previous aligned slice to anchor to.')
+    repair_start, repair_end, range_space = _normalize_slice_range(base_config, original_min, original_max, slice_range)
+    start_global = _global_z_for_local(base_config, original_min, repair_start)
+    LOGGER.info(
+        'Interpreting requested slice range %d:%d as %s coordinates -> local z %d:%d, destination/global z %d:%d.',
+        slice_range[0],
+        slice_range[1],
+        range_space,
+        repair_start,
+        repair_end,
+        start_global,
+        _global_z_for_local(base_config, original_min, repair_end),
+    )
+    if repair_start == original_min and base_config.get('first_slice') is None and base_config.get('reference_path') is None and start_global <= 0:
+        raise ValueError('Cannot repair the first slice of a root stack because there is no previous aligned destination slice to anchor to.')
 
     preview_stop = min(original_max, max(repair_end + 1, repair_start + 1) + max(0, preview_after))
-    start_global = _global_z_for_local(base_config, original_min, repair_start)
 
     client = get_mongo_client(base_config.get('mongodb_config_filepath'))
     db = get_mongo_db(client, base_config['project_name'])
@@ -171,7 +201,7 @@ def main() -> None:
         )
     )
     parser.add_argument('--slice-range', required=True, type=_parse_slice_range,
-                        help='Input stack-local bad slice or inclusive range to preview, e.g. "201" or "201:205".')
+                        help='Bad slice or inclusive range to preview. Values may be stack-local z (e.g. "0" or "0:5") or destination/global z (e.g. "530" or "530:531").')
     parser.add_argument('--preview-after', type=int, default=5,
                         help='Number of additional slices after --slice-range to include in the preview realignment.')
     parser.add_argument('--port', type=int, default=55555, help='Neuroglancer bind port for inspection.')
