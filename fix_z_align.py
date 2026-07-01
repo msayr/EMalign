@@ -364,13 +364,13 @@ def repair_z_alignment(config_path: str,
     if repair_start == original_min and base_config.get('first_slice') is None and base_config.get('reference_path') is None and start_global <= 0:
         raise ValueError('Cannot repair the first slice of a root stack because there is no previous aligned destination slice to anchor to.')
 
-    preview_stop = min(original_max, max(repair_end + 1, repair_start + 1) + max(0, preview_after))
+    preview_stop = min(original_max, repair_end + 1)
 
     client = get_mongo_client(base_config.get('mongodb_config_filepath'))
     db = get_mongo_db(client, base_config['project_name'])
 
     if not skip_preview:
-        LOGGER.info('Realigning preview range local z [%d, %d) for %s.', repair_start, preview_stop, dataset_name)
+        LOGGER.info('Realigning requested local z range [%d, %d) for %s.', repair_start, preview_stop, dataset_name)
         preview_config = _make_repair_config(base_config, original_min, repair_start, preview_stop)
         preview_stop_global = _global_z_for_local(base_config, original_min, preview_stop - 1) + 1
         preview_output_snapshots = _snapshot_preview_outputs(base_config, start_global, preview_stop_global)
@@ -385,7 +385,7 @@ def repair_z_alignment(config_path: str,
             raise
 
         inspect_min = max(0, start_global - 2)
-        inspect_max = _global_z_for_local(base_config, original_min, preview_stop - 1) + 3
+        inspect_max = _global_z_for_local(base_config, original_min, preview_stop - 1) + max(3, preview_after + 1)
         LOGGER.info('Opening Neuroglancer for destination slices [%d, %d).', inspect_min, inspect_max)
         inspect_dataset(base_config['destination_path'],
                         bounding_box=[inspect_min, inspect_max],
@@ -441,7 +441,7 @@ def main() -> None:
     parser.add_argument('--slice-range', required=True, type=_parse_slice_range,
                         help='Bad destination/global slice or inclusive global range to preview, e.g. "531" or "531:536". Local stack slice numbers are not accepted.')
     parser.add_argument('--preview-after', type=int, default=5,
-                        help='Number of additional slices after --slice-range to include in the preview realignment.')
+                        help='Number of additional destination/global slices after --slice-range to include in the Neuroglancer preview only. These context slices are not realigned during preview.')
     parser.add_argument('--port', type=int, default=55555, help='Neuroglancer bind port for inspection.')
     parser.add_argument('--skip-preview', action='store_true',
                         help='Do not pause for Neuroglancer confirmation; immediately propagate to the end of the stack.')
