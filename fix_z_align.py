@@ -14,10 +14,6 @@ import logging
 import os
 from typing import Optional, Tuple
 
-from emalign.inspect_dataset import inspect_dataset
-from emalign.io.progress import get_mongo_client, get_mongo_db
-from emalign.io.store import open_store
-from emalign.scripts.align_stack_z import align_stack_z
 
 
 logging.basicConfig(level=logging.INFO)
@@ -40,6 +36,8 @@ def _parse_slice_range(value: str) -> Tuple[int, int]:
 
 def _stack_bounds(config: dict) -> Tuple[int, int]:
     """Return the local [min, max) bounds covered by the original stack config."""
+    from emalign.io.store import open_store
+
     dataset = open_store(os.path.abspath(config['dataset_path']), mode='r')
     default_min = int(dataset.domain.inclusive_min[0])
     default_max = int(dataset.domain.exclusive_max[0])
@@ -89,6 +87,10 @@ def repair_z_alignment(config_path: str,
                        inspect_port: int,
                        skip_preview: bool = False,
                        project_name: Optional[str] = None) -> None:
+    from emalign.inspect_dataset import inspect_dataset
+    from emalign.io.progress import get_mongo_client, get_mongo_db
+    from emalign.scripts.align_stack_z import align_stack_z
+
     with open(config_path, 'r') as f:
         base_config = json.load(f)
 
@@ -142,8 +144,32 @@ def repair_z_alignment(config_path: str,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='Repair and propagate a problematic Z alignment in an existing EMalign stack.')
-    parser.add_argument('config_file', help='Existing align_stack_z JSON config for the stack to repair.')
+    parser = argparse.ArgumentParser(
+        description='Repair and propagate a problematic Z alignment in an existing EMalign stack.',
+        epilog=(
+            'CONFIG_FILE must be the JSON file generated for align_stack_z (for example, '
+            'a stack config under your z-alignment config output directory), not the '
+            'destination zarr/final aligned stack path. You may pass it positionally '
+            'or with --config-file.'
+        )
+    )
+    parser.add_argument(
+        'config_file',
+        nargs='?',
+        help=(
+            'Path to the existing align_stack_z JSON config for the stack to repair. '
+            'This is not the destination_path/final aligned stack directory.'
+        )
+    )
+    parser.add_argument(
+        '--config-file',
+        '--config_file',
+        dest='config_file_option',
+        help=(
+            'Path to the existing align_stack_z JSON config for the stack to repair. '
+            'Use this if you prefer a named flag instead of the positional CONFIG_FILE.'
+        )
+    )
     parser.add_argument('--slice-range', required=True, type=_parse_slice_range,
                         help='Input stack-local bad slice or inclusive range to preview, e.g. "201" or "201:205".')
     parser.add_argument('--preview-after', type=int, default=5,
@@ -153,8 +179,13 @@ def main() -> None:
                         help='Do not pause for Neuroglancer confirmation; immediately propagate to the end of the stack.')
     parser.add_argument('--project-name', default=None, help='Override project_name from the config file.')
     args = parser.parse_args()
+    config_file = args.config_file_option or args.config_file
+    if config_file is None:
+        parser.error('CONFIG_FILE is required. Provide an align_stack_z JSON config positionally or with --config-file.')
+    if args.config_file_option and args.config_file and args.config_file_option != args.config_file:
+        parser.error('Provide CONFIG_FILE either positionally or with --config-file, not both with different values.')
 
-    repair_z_alignment(args.config_file, args.slice_range, args.preview_after, args.port, args.skip_preview, args.project_name)
+    repair_z_alignment(config_file, args.slice_range, args.preview_after, args.port, args.skip_preview, args.project_name)
 
 
 if __name__ == '__main__':
