@@ -11,12 +11,12 @@ the suffix only.
 
 import argparse
 import copy
-import json
 import inspect
+import json
 import logging
 import os
 from glob import glob
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 
 
@@ -141,19 +141,34 @@ def _normalize_slice_range(config: dict, original_local_min: int, original_local
     )
 
 
-def _delete_progress_suffix(db, dataset_name: str, start_local: int, start_global: int, *, include_mesh: bool) -> None:
+def _progress_delete_filter(start_local: int, start_global: int, *, include_mesh: bool) -> dict:
+    filters = [
+        {'step_name': 'flow_z', 'local_slice': {'$gte': int(start_local)}},
+        {'step_name': 'render_z', 'local_slice': {'$gte': int(start_local)}},
+        {'step_name': 'render_z', 'global_slice': {'$gte': int(start_global)}},
+    ]
+    if include_mesh:
+        filters.append({'step_name': 'mesh_relax_z'})
+    return {'$or': filters}
+
+
+def _delete_progress_suffix(db, dataset_name: str, start_local: int, start_global: int, *, include_mesh: bool) -> List[dict]:
     """Remove cached progress docs that would otherwise cause suffix repair to be skipped."""
     collection = db[dataset_name]
-    result = collection.delete_many({
-        '$or': [
-            {'step_name': 'flow_z', 'local_slice': {'$gte': int(start_local)}},
-            {'step_name': 'render_z', 'global_slice': {'$gte': int(start_global)}},
-        ]
-    })
-    LOGGER.info('Deleted %d cached flow/render MongoDB progress documents.', result.deleted_count)
-    if include_mesh:
-        mesh_result = collection.delete_many({'step_name': 'mesh_relax_z'})
-        LOGGER.info('Deleted %d cached mesh MongoDB progress documents.', mesh_result.deleted_count)
+    doc_filter = _progress_delete_filter(start_local, start_global, include_mesh=include_mesh)
+    deleted_docs = list(collection.find(doc_filter))
+    result = collection.delete_many(doc_filter)
+    LOGGER.info('Deleted %d cached MongoDB progress documents so the requested Z range is recomputed.', result.deleted_count)
+    return deleted_docs
+
+
+def _restore_progress_suffix(db, dataset_name: str, start_local: int, start_global: int, docs: List[dict], *, include_mesh: bool) -> None:
+    """Restore progress docs saved before a preview realignment."""
+    collection = db[dataset_name]
+    collection.delete_many(_progress_delete_filter(start_local, start_global, include_mesh=include_mesh))
+    if docs:
+        collection.insert_many(docs)
+    LOGGER.info('Restored %d MongoDB progress documents from before the preview.', len(docs))
 
 
 def _make_repair_config(base_config: dict, original_local_min: int, local_start: int, local_stop_exclusive: int) -> dict:
@@ -177,6 +192,89 @@ def _call_align_stack_z(align_stack_z, config: dict) -> None:
     if ignored:
         LOGGER.debug('Ignoring config keys not accepted by align_stack_z: %s', ', '.join(ignored))
     align_stack_z(**relevant_args)
+
+
+def _force_stack_unprocessed(config: dict) -> dict:
+    """Temporarily clear the source z_aligned flag so align_stack_z cannot skip."""
+    from emalign.io.store import get_store_attributes, set_store_attributes
+
+    attrs = get_store_attributes(config['dataset_path'])
+    updated = copy.deepcopy(attrs)
+    updated['z_aligned'] = False
+    set_store_attributes(config['dataset_path'], updated)
+    return attrs
+
+
+def _restore_stack_attrs(config: dict, attrs: dict) -> None:
+    from emalign.io.store import set_store_attributes
+
+    set_store_attributes(config['dataset_path'], attrs)
+
+
+def _run_forced_align_stack_z(align_stack_z, config: dict) -> dict:
+    """Run align_stack_z after clearing the metadata flag that would skip it."""
+    original_attrs = _force_stack_unprocessed(config)
+    _call_align_stack_z(align_stack_z, config)
+    return original_attrs
+
+
+def _downsampled_destination_path(destination_path: str, save_downsampled: float) -> str:
+    output_path, project_name_from_path = destination_path.rsplit('/', maxsplit=1)
+    return os.path.join(output_path, f'{save_downsampled}x_' + project_name_from_path)
+
+
+def _snapshot_store_range(path: str, start_global: int, stop_global: int, dtype, *, allow_missing: bool = False) -> Optional[dict]:
+    from emalign.io.store import open_store
+
+    store = open_store(path, mode='r+', dtype=dtype, allow_missing=allow_missing)
+    if store is None:
+        return None
+    return {
+        'path': path,
+        'dtype': dtype,
+        'start': int(start_global),
+        'stop': int(stop_global),
+        'data': store[start_global:stop_global].read().result(),
+    }
+
+
+def _restore_store_range(snapshot: Optional[dict]) -> None:
+    if snapshot is None:
+        return
+
+    from emalign.io.store import open_store
+
+    store = open_store(snapshot['path'], mode='r+', dtype=snapshot['dtype'])
+    store[snapshot['start']:snapshot['stop']].write(snapshot['data']).result()
+
+
+def _snapshot_preview_outputs(config: dict, start_global: int, stop_global: int) -> List[Optional[dict]]:
+    """Capture destination data that preview alignment may overwrite."""
+    import tensorstore as ts
+
+    snapshots = [
+        _snapshot_store_range(config['destination_path'], start_global, stop_global, ts.uint8),
+        _snapshot_store_range(config['destination_path'] + '_mask', start_global, stop_global, ts.bool),
+    ]
+
+    save_downsampled = config.get('save_downsampled', 1)
+    if save_downsampled != 1:
+        snapshots.append(
+            _snapshot_store_range(
+                _downsampled_destination_path(config['destination_path'], save_downsampled),
+                start_global,
+                stop_global,
+                ts.uint8,
+                allow_missing=True,
+            )
+        )
+
+    return snapshots
+
+
+def _restore_preview_outputs(snapshots: List[Optional[dict]]) -> None:
+    for snapshot in snapshots:
+        _restore_store_range(snapshot)
 
 
 def _confirm(prompt: str) -> bool:
@@ -223,9 +321,18 @@ def repair_z_alignment(config_path: str,
 
     if not skip_preview:
         LOGGER.info('Realigning preview range local z [%d, %d) for %s.', repair_start, preview_stop, dataset_name)
-        _delete_progress_suffix(db, dataset_name, repair_start, start_global, include_mesh=True)
         preview_config = _make_repair_config(base_config, original_min, repair_start, preview_stop)
-        _call_align_stack_z(align_stack_z, preview_config)
+        preview_stop_global = _global_z_for_local(base_config, original_min, preview_stop - 1) + 1
+        preview_output_snapshots = _snapshot_preview_outputs(base_config, start_global, preview_stop_global)
+        preview_progress_docs = _delete_progress_suffix(db, dataset_name, repair_start, start_global, include_mesh=True)
+        preview_attrs = _force_stack_unprocessed(preview_config)
+        try:
+            _call_align_stack_z(align_stack_z, preview_config)
+        except Exception:
+            _restore_preview_outputs(preview_output_snapshots)
+            _restore_progress_suffix(db, dataset_name, repair_start, start_global, preview_progress_docs, include_mesh=True)
+            _restore_stack_attrs(preview_config, preview_attrs)
+            raise
 
         inspect_min = max(0, start_global - 2)
         inspect_max = _global_z_for_local(base_config, original_min, preview_stop - 1) + 3
@@ -236,13 +343,16 @@ def repair_z_alignment(config_path: str,
                         bind_port=inspect_port)
 
         if not _confirm('Does the previewed Z alignment look correct and should the repair be propagated to the end of the stack?'):
-            LOGGER.warning('Repair was not propagated. Preview slices already written to the destination remain in place.')
+            LOGGER.warning('Repair was not propagated. Restoring destination slices, MongoDB progress, and source stack metadata from before the preview.')
+            _restore_preview_outputs(preview_output_snapshots)
+            _restore_progress_suffix(db, dataset_name, repair_start, start_global, preview_progress_docs, include_mesh=True)
+            _restore_stack_attrs(preview_config, preview_attrs)
             return
 
     LOGGER.info('Propagating repaired alignment from local z %d through %d for %s.', repair_start, original_max, dataset_name)
     _delete_progress_suffix(db, dataset_name, repair_start, start_global, include_mesh=True)
     final_config = _make_repair_config(base_config, original_min, repair_start, original_max)
-    _call_align_stack_z(align_stack_z, final_config)
+    _run_forced_align_stack_z(align_stack_z, final_config)
 
     LOGGER.info('Repair complete. Opening final Neuroglancer inspection view.')
     inspect_dataset(base_config['destination_path'],
