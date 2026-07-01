@@ -60,12 +60,16 @@ def get_dataset_names(datasets):
     return names
 
 
-def get_ordered_datasets(config_paths, exclude=[]):
+def get_ordered_datasets(config_paths, exclude=[], fused_only=False):
     '''Open and order datastacks based on Z offset.
 
     Args:
         dataset_paths (list): List of paths to the datasets to open and order.
         exclude (list, optional): List of strings to find in paths. If the string is found, the path will be ignored. 
+        fused_only (bool, optional): If True, keep only fused XY-intermediate datasets
+            for each main config when one or more fused datasets are present. This
+            is useful for Z alignment, where each XY config should contribute its
+            final stack rather than all intermediate tiles.
 
     Returns:
         tuple: tuple of:
@@ -80,13 +84,14 @@ def get_ordered_datasets(config_paths, exclude=[]):
         else:
             config_groups.append([config])
 
-    # Check config one by one
+    # Check config one by one. Each XY main config already stores global Z
+    # coordinates in the TensorStore voxel_offset written by align_stack_xy. Do
+    # not add the previous config's extent here: doing so double-counts offsets
+    # when multiple independently generated XY configs are supplied to
+    # prep_config_z.
     dataset_stores = []
     offsets = []
-    previous_offset = 0
     for config_group in config_groups:
-        group_offsets = []
-        z_shapes = []
         for config_path in config_group:
             with open(config_path, 'r') as f:
                 main_config = json.load(f)
@@ -94,23 +99,21 @@ def get_ordered_datasets(config_paths, exclude=[]):
             # Get info from config
             output_path     = main_config['output_path']
             dataset_paths = glob(os.path.join(output_path, 'xy_intermediate', '*/'))
+            dataset_paths = [
+                ds for ds in dataset_paths
+                if not any(pattern in ds for pattern in exclude)
+                and not os.path.abspath(ds).endswith('_mask')
+            ]
+            if fused_only:
+                fused_paths = [ds for ds in dataset_paths if os.path.basename(os.path.normpath(ds)).endswith('_fused')]
+                if fused_paths:
+                    dataset_paths = fused_paths
 
             for ds in dataset_paths:
-                check = [pattern in ds for pattern in exclude]
-                if any(check) or os.path.abspath(ds).endswith('_mask'):
-                    # Always exclude masks from query
-                    continue
                 dataset = open_store(ds, mode='r')
-                z_shapes.append(dataset.shape[0])
-
                 offset = get_store_attributes(dataset)['voxel_offset']
-                offset[0] += previous_offset # Shift this dataset by the previous dataset's offset
-                group_offsets.append(offset)
                 offsets.append(offset)
                 dataset_stores.append(dataset)
-
-        # If configs are supposed to be consecutive stacks, the offsets should match that
-        previous_offset = np.array(group_offsets)[:,0].max() + z_shapes[np.array(group_offsets)[:,0].argmax()]
 
     offsets = np.array(offsets)
 

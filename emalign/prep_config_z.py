@@ -66,7 +66,7 @@ def load_configs_from_files(config_paths, exclude):
 
     # Get list of datasets and offsets
     try:
-        datasets, z_offsets = get_ordered_datasets(config_paths, exclude=exclude)
+        datasets, z_offsets = get_ordered_datasets(config_paths, exclude=exclude, fused_only=True)
     except Exception as e:
         raise RuntimeError(f'Failed to load datasets from config files: {e}')
 
