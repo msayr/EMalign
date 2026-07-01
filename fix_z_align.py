@@ -234,6 +234,8 @@ def _snapshot_store_range(path: str, start_global: int, stop_global: int, dtype,
         'dtype': dtype,
         'start': int(start_global),
         'stop': int(stop_global),
+        'inclusive_min': [int(v) for v in store.domain.inclusive_min],
+        'exclusive_max': [int(v) for v in store.domain.exclusive_max],
         'data': store[start_global:stop_global].read().result(),
     }
 
@@ -245,6 +247,10 @@ def _restore_store_range(snapshot: Optional[dict]) -> None:
     from emalign.io.store import open_store
 
     store = open_store(snapshot['path'], mode='r+', dtype=snapshot['dtype'])
+    store = store.resize(
+        inclusive_min=snapshot['inclusive_min'],
+        exclusive_max=snapshot['exclusive_max'],
+    ).result()
     store[snapshot['start']:snapshot['stop']].write(snapshot['data']).result()
 
 
