@@ -266,14 +266,20 @@ def _snapshot_store_range(path: str, start_global: int, stop_global: int, dtype,
     store = open_store(path, mode='r+', dtype=dtype, allow_missing=allow_missing)
     if store is None:
         return None
+    inclusive_min = [int(v) for v in store.domain.inclusive_min]
+    exclusive_max = [int(v) for v in store.domain.exclusive_max]
+    read_start = max(int(start_global), inclusive_min[0])
+    read_stop = min(int(stop_global), exclusive_max[0])
     return {
         'path': path,
         'dtype': dtype,
         'start': int(start_global),
         'stop': int(stop_global),
-        'inclusive_min': [int(v) for v in store.domain.inclusive_min],
-        'exclusive_max': [int(v) for v in store.domain.exclusive_max],
-        'data': store[start_global:stop_global].read().result(),
+        'read_start': read_start,
+        'read_stop': read_stop,
+        'inclusive_min': inclusive_min,
+        'exclusive_max': exclusive_max,
+        'data': store[read_start:read_stop].read().result() if read_start < read_stop else None,
     }
 
 
@@ -288,7 +294,8 @@ def _restore_store_range(snapshot: Optional[dict]) -> None:
         inclusive_min=snapshot['inclusive_min'],
         exclusive_max=snapshot['exclusive_max'],
     ).result()
-    store[snapshot['start']:snapshot['stop']].write(snapshot['data']).result()
+    if snapshot['data'] is not None:
+        store[snapshot['read_start']:snapshot['read_stop']].write(snapshot['data']).result()
 
 
 def _snapshot_preview_outputs(config: dict, start_global: int, stop_global: int) -> List[Optional[dict]]:
