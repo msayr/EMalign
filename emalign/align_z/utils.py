@@ -22,11 +22,11 @@ def get_dataset_names(datasets):
     '''Return stable, unique names for TensorStore datasets.
 
     XY intermediate datasets from separate stack configs can share the same leaf
-    name (for example, both stacks may contain ``01_g0000_t0000``). Z-alignment
-    plans and per-dataset config files are keyed by dataset name, so duplicate
-    leaf names would collapse distinct stacks into one entry. Keep the legacy
-    leaf name when it is already unique; otherwise prefix it with the containing
-    zarr directory name and finally an index if needed.
+    name (for example, both stacks may contain ``01_g0000_t0000``), and a
+    multi-substack XY config can otherwise produce names that no longer identify
+    their source stack. Z-alignment plans and per-dataset config files are keyed
+    by dataset name, so prefix XY-intermediate names with the containing zarr
+    directory name and finally an index if needed.
     '''
     paths = [os.path.abspath(d.kvstore.path) for d in datasets]
     leaf_names = [os.path.basename(path) for path in paths]
@@ -36,13 +36,13 @@ def get_dataset_names(datasets):
     used = set()
     for idx, path in enumerate(paths):
         leaf_name = leaf_names[idx]
-        if leaf_name in duplicate_leaf_names:
-            parts = path.split(os.sep)
-            try:
-                xy_idx = parts.index('xy_intermediate')
-                prefix = parts[xy_idx - 1] if xy_idx > 0 else os.path.basename(os.path.dirname(path))
-            except ValueError:
-                prefix = os.path.basename(os.path.dirname(path))
+        parts = path.split(os.sep)
+        if 'xy_intermediate' in parts:
+            xy_idx = parts.index('xy_intermediate')
+            prefix = parts[xy_idx - 1] if xy_idx > 0 else os.path.basename(os.path.dirname(path))
+            name = f'{prefix}__{leaf_name}'
+        elif leaf_name in duplicate_leaf_names:
+            prefix = os.path.basename(os.path.dirname(path))
             name = f'{prefix}__{leaf_name}'
         else:
             name = leaf_name
@@ -289,12 +289,28 @@ def compute_alignment_path(datasets,
                     G.add_edge(u,v, M=M, out_shape=out_shape, ref_offset=ref_offset, valid_estimate=valid_estimate)
 
     paths = extract_paths_from_root(G, root_node_idx)
-    if not paths:
-        # SIFT may fail to produce a graph edge for consecutive stack configs,
-        # especially when there is no Z overlap and the intended comparison is
-        # simply the last slice of one stack against the first slice of the next.
-        # Do not silently collapse such multi-stack inputs to the root stack:
-        # preserve the Z order so prep_config_z writes one config per stack.
+
+    if not nx.is_connected(G):
+        # Some datasets are disconnected in the SIFT graph. Preserve all
+        # datasets, but keep disconnected components in separate paths rather
+        # than forcing a linear predecessor/successor relationship. Otherwise a
+        # spatially disconnected substack can be configured to align against the
+        # previous stack's final rendered slice, which later fails because the
+        # reference and moving masks do not overlap.
+        components = [
+            sorted(component, key=lambda j: (z_offsets[j, 0], j))
+            for component in nx.connected_components(G)
+        ]
+        components.sort(key=lambda component: (z_offsets[component[0], 0], component[0]))
+        paths = components
+        logging.warning(
+            'Some datasets are disconnected in the SIFT graph; creating separate '
+            'alignment paths for components: %s',
+            [[dataset_names[i] for i in component] for component in components]
+        )
+    elif not paths:
+        # SIFT may still produce a connected graph shape that the path extractor
+        # cannot linearize. Preserve the Z order as a last-resort fallback.
         ordered_nodes = [root_node_idx] + [
             i for i in sorted(G.nodes, key=lambda j: (z_offsets[j, 0], j))
             if i != root_node_idx
@@ -306,20 +322,6 @@ def compute_alignment_path(datasets,
             root_node,
             [dataset_names[i] for i in ordered_nodes]
         )
-
-    if not nx.is_connected(G):
-        # Some datasets are disconnected in the SIFT graph. Keep generating a
-        # complete alignment plan in Z order instead of dropping later stacks.
-        components = [[dataset_names[i] for i in cc] for cc in nx.connected_components(G)]
-        logging.warning(
-            'Some datasets are disconnected in the SIFT graph; '
-            'falling back to Z-offset order. Components: %s',
-            components
-        )
-        paths = [[root_node_idx] + [
-            i for i in sorted(G.nodes, key=lambda j: (z_offsets[j, 0], j))
-            if i != root_node_idx
-        ]]
 
     reverse_z = [bool(z_offsets[p[0], 0] > z_offsets[p[-1], 0]) for p in paths]
     paths = [[dataset_names[i] for i in p] for p in paths]
