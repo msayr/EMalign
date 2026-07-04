@@ -22,11 +22,11 @@ def get_dataset_names(datasets):
     '''Return stable, unique names for TensorStore datasets.
 
     XY intermediate datasets from separate stack configs can share the same leaf
-    name (for example, both stacks may contain ``01_g0000_t0000``). Z-alignment
-    plans and per-dataset config files are keyed by dataset name, so duplicate
-    leaf names would collapse distinct stacks into one entry. Keep the legacy
-    leaf name when it is already unique; otherwise prefix it with the containing
-    zarr directory name and finally an index if needed.
+    name (for example, both stacks may contain ``01_g0000_t0000``), and a
+    multi-substack XY config can otherwise produce names that no longer identify
+    their source stack. Z-alignment plans and per-dataset config files are keyed
+    by dataset name, so prefix XY-intermediate names with the containing zarr
+    directory name and finally an index if needed.
     '''
     paths = [os.path.abspath(d.kvstore.path) for d in datasets]
     leaf_names = [os.path.basename(path) for path in paths]
@@ -36,13 +36,13 @@ def get_dataset_names(datasets):
     used = set()
     for idx, path in enumerate(paths):
         leaf_name = leaf_names[idx]
-        if leaf_name in duplicate_leaf_names:
-            parts = path.split(os.sep)
-            try:
-                xy_idx = parts.index('xy_intermediate')
-                prefix = parts[xy_idx - 1] if xy_idx > 0 else os.path.basename(os.path.dirname(path))
-            except ValueError:
-                prefix = os.path.basename(os.path.dirname(path))
+        parts = path.split(os.sep)
+        if 'xy_intermediate' in parts:
+            xy_idx = parts.index('xy_intermediate')
+            prefix = parts[xy_idx - 1] if xy_idx > 0 else os.path.basename(os.path.dirname(path))
+            name = f'{prefix}__{leaf_name}'
+        elif leaf_name in duplicate_leaf_names:
+            prefix = os.path.basename(os.path.dirname(path))
             name = f'{prefix}__{leaf_name}'
         else:
             name = leaf_name
@@ -60,12 +60,16 @@ def get_dataset_names(datasets):
     return names
 
 
-def get_ordered_datasets(config_paths, exclude=[]):
+def get_ordered_datasets(config_paths, exclude=[], fused_only=False):
     '''Open and order datastacks based on Z offset.
 
     Args:
         dataset_paths (list): List of paths to the datasets to open and order.
         exclude (list, optional): List of strings to find in paths. If the string is found, the path will be ignored. 
+        fused_only (bool, optional): If True, keep only fused XY-intermediate datasets
+            for each main config when one or more fused datasets are present. This
+            is useful for Z alignment, where each XY config should contribute its
+            final stack rather than all intermediate tiles.
 
     Returns:
         tuple: tuple of:
@@ -80,13 +84,14 @@ def get_ordered_datasets(config_paths, exclude=[]):
         else:
             config_groups.append([config])
 
-    # Check config one by one
+    # Check config one by one. Each XY main config already stores global Z
+    # coordinates in the TensorStore voxel_offset written by align_stack_xy. Do
+    # not add the previous config's extent here: doing so double-counts offsets
+    # when multiple independently generated XY configs are supplied to
+    # prep_config_z.
     dataset_stores = []
     offsets = []
-    previous_offset = 0
     for config_group in config_groups:
-        group_offsets = []
-        z_shapes = []
         for config_path in config_group:
             with open(config_path, 'r') as f:
                 main_config = json.load(f)
@@ -94,23 +99,21 @@ def get_ordered_datasets(config_paths, exclude=[]):
             # Get info from config
             output_path     = main_config['output_path']
             dataset_paths = glob(os.path.join(output_path, 'xy_intermediate', '*/'))
+            dataset_paths = [
+                ds for ds in dataset_paths
+                if not any(pattern in ds for pattern in exclude)
+                and not os.path.abspath(ds).endswith('_mask')
+            ]
+            if fused_only:
+                fused_paths = [ds for ds in dataset_paths if os.path.basename(os.path.normpath(ds)).endswith('_fused')]
+                if fused_paths:
+                    dataset_paths = fused_paths
 
             for ds in dataset_paths:
-                check = [pattern in ds for pattern in exclude]
-                if any(check) or os.path.abspath(ds).endswith('_mask'):
-                    # Always exclude masks from query
-                    continue
                 dataset = open_store(ds, mode='r')
-                z_shapes.append(dataset.shape[0])
-
                 offset = get_store_attributes(dataset)['voxel_offset']
-                offset[0] += previous_offset # Shift this dataset by the previous dataset's offset
-                group_offsets.append(offset)
                 offsets.append(offset)
                 dataset_stores.append(dataset)
-
-        # If configs are supposed to be consecutive stacks, the offsets should match that
-        previous_offset = np.array(group_offsets)[:,0].max() + z_shapes[np.array(group_offsets)[:,0].argmax()]
 
     offsets = np.array(offsets)
 
@@ -286,12 +289,28 @@ def compute_alignment_path(datasets,
                     G.add_edge(u,v, M=M, out_shape=out_shape, ref_offset=ref_offset, valid_estimate=valid_estimate)
 
     paths = extract_paths_from_root(G, root_node_idx)
-    if not paths:
-        # SIFT may fail to produce a graph edge for consecutive stack configs,
-        # especially when there is no Z overlap and the intended comparison is
-        # simply the last slice of one stack against the first slice of the next.
-        # Do not silently collapse such multi-stack inputs to the root stack:
-        # preserve the Z order so prep_config_z writes one config per stack.
+
+    if not nx.is_connected(G):
+        # Some datasets are disconnected in the SIFT graph. Preserve all
+        # datasets, but keep disconnected components in separate paths rather
+        # than forcing a linear predecessor/successor relationship. Otherwise a
+        # spatially disconnected substack can be configured to align against the
+        # previous stack's final rendered slice, which later fails because the
+        # reference and moving masks do not overlap.
+        components = [
+            sorted(component, key=lambda j: (z_offsets[j, 0], j))
+            for component in nx.connected_components(G)
+        ]
+        components.sort(key=lambda component: (z_offsets[component[0], 0], component[0]))
+        paths = components
+        logging.warning(
+            'Some datasets are disconnected in the SIFT graph; creating separate '
+            'alignment paths for components: %s',
+            [[dataset_names[i] for i in component] for component in components]
+        )
+    elif not paths:
+        # SIFT may still produce a connected graph shape that the path extractor
+        # cannot linearize. Preserve the Z order as a last-resort fallback.
         ordered_nodes = [root_node_idx] + [
             i for i in sorted(G.nodes, key=lambda j: (z_offsets[j, 0], j))
             if i != root_node_idx
@@ -303,20 +322,6 @@ def compute_alignment_path(datasets,
             root_node,
             [dataset_names[i] for i in ordered_nodes]
         )
-
-    if not nx.is_connected(G):
-        # Some datasets are disconnected in the SIFT graph. Keep generating a
-        # complete alignment plan in Z order instead of dropping later stacks.
-        components = [[dataset_names[i] for i in cc] for cc in nx.connected_components(G)]
-        logging.warning(
-            'Some datasets are disconnected in the SIFT graph; '
-            'falling back to Z-offset order. Components: %s',
-            components
-        )
-        paths = [[root_node_idx] + [
-            i for i in sorted(G.nodes, key=lambda j: (z_offsets[j, 0], j))
-            if i != root_node_idx
-        ]]
 
     reverse_z = [bool(z_offsets[p[0], 0] > z_offsets[p[-1], 0]) for p in paths]
     paths = [[dataset_names[i] for i in p] for p in paths]

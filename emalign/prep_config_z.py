@@ -66,7 +66,7 @@ def load_configs_from_files(config_paths, exclude):
 
     # Get list of datasets and offsets
     try:
-        datasets, z_offsets = get_ordered_datasets(config_paths, exclude=exclude)
+        datasets, z_offsets = get_ordered_datasets(config_paths, exclude=exclude, fused_only=True)
     except Exception as e:
         raise RuntimeError(f'Failed to load datasets from config files: {e}')
 
@@ -180,9 +180,14 @@ def create_alignment_configs(datasets, z_offsets, output_configs_dir, config_z, 
                 bbox_ref = ref_bboxes[idx]
                 bbox_ref_start = np.array([bbox_ref[2], bbox_ref[0]]) # xy
                 xy_offset = np.abs(ref_global_bbox_start - bbox_ref_start).astype(int).tolist()
-            elif dataset_name == path[0] and i == 0:
-                # Very first dataset to align without reference should be root
-                assert dataset_name == root_stack, f'First dataset ({dataset_name}) of the path is not the root stack ({root_stack})'
+            elif dataset_name == path[0]:
+                # First dataset of a path has no predecessor to align against.
+                # For the first path this is the root stack; for later paths it
+                # is a disconnected component that should be rendered using the
+                # same canvas origin instead of borrowing the previous path's
+                # final slice as an external reference.
+                if i == 0:
+                    assert dataset_name == root_stack, f'First dataset ({dataset_name}) of the path is not the root stack ({root_stack})'
                 first_slice = None
                 xy_offset = list(map(int, root_offset))
                 bbox_ref = None
