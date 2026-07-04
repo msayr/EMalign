@@ -260,13 +260,25 @@ def _compute_flow(dataset,
     #---------- Start processing ----------#
     mfc = flow_field.JAXMaskedXCorrWithStatsCalculator()
 
+    pending_invalid_flows = 0
+
+    def append_invalid_flow():
+        nonlocal pending_invalid_flows
+        if flows:
+            flows.append(np.ones_like(flows[-1]) * np.nan)
+        else:
+            # Flow shape is only known after the first valid pair is computed.
+            # Keep leading skipped/empty slices pending and backfill them once
+            # a real flow exists instead of indexing flows[-1].
+            pending_invalid_flows += 1
+
     pbar = tqdm(range(start, dataset.domain.exclusive_max[0]), position=0, dynamic_ncols=True)
     for z in pbar:
         if z in ignore_slices:
             pbar.set_description(f'{dataset_name}: Ignoring slice...')
             # Slice is to be ignored for flow computation based on user input.
             # These should not be used for mesh relaxation or they will bias the result, so we set them as invalid.
-            flows.append(np.ones_like(flows[-1]) * np.nan)
+            append_invalid_flow()
             
             metadata = {
                 'ref_dataset': ref_dataset_name,
@@ -286,7 +298,7 @@ def _compute_flow(dataset,
         # If empty slice, skip and compare to next one
         if not mov.any():
             # We should be starting with a non-empty slice, so by the time we hit this, flow should exist
-            flows.append(np.ones_like(flows[-1]) * np.nan)
+            append_invalid_flow()
             metadata = {
                 'ref_dataset': ref_dataset_name,
                 'scale': scale,
@@ -384,6 +396,9 @@ def _compute_flow(dataset,
         # Compute flow
         flow = _compute_flow_slice(overlap_ref, overlap_ref_mask, 
                                    mov, mov_mask, mfc, patch_size, stride)
+        if pending_invalid_flows:
+            flows.extend([np.ones_like(flow) * np.nan] * pending_invalid_flows)
+            pending_invalid_flows = 0
         flows.append(flow)
 
         # Save to file + database
@@ -420,6 +435,11 @@ def _compute_flow(dataset,
             z_ref = z
 
     jax.clear_caches()
+
+    if pending_invalid_flows:
+        raise ValueError(
+            f'{dataset_name}: no valid slices were available after applying ignored/empty slices.'
+        )
 
     flows = homogenize_arrays_shape(flows, pad_value=np.nan)
     flows = np.transpose(flows, [1, 0, 2, 3])  # [channels, z, y, x]
