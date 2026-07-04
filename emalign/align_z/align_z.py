@@ -199,18 +199,27 @@ def _compute_flow(dataset,
         if check_progress(db, dataset_name, step_name, z, doc_filter={'scale': scale}):
             flows.append(dataset_flow[z].read().result())
             transform[z] = dataset_trsf[z].read().result() if transformations is None else transformations[z]
+            progress_doc = db[dataset_name].find_one(
+                {'step_name': step_name, 'local_slice': z, 'scale': scale},
+                {'bbox_anchor': 1, 'bbox_ref': 1}
+            ) or {}
 
             if z == anchor_z and bbox_anchor is None:
                 # Get bbox from previous slices (should be passed but take it for return)
-                bbox_anchor = db[dataset_name].find_one({'step_name': step_name, 'local_slice': z, 'scale': scale}, 
-                                                        {'bbox_anchor': 1})['bbox_anchor']
+                bbox_anchor = progress_doc.get('bbox_anchor') or progress_doc.get('bbox_ref')
             elif z > anchor_z and bbox_ref is None:
                 # Get bbox from previous slices
-                bbox_ref = db[dataset_name].find_one({'step_name': step_name, 'local_slice': z, 'scale': scale}, 
-                                                     {'bbox_ref': 1})['bbox_ref']
+                bbox_ref = progress_doc.get('bbox_ref')
+            if z > anchor_z and bbox_anchor is None:
+                # Older progress docs for leading skipped slices may not have
+                # bbox_anchor. Fall back to the first available bbox from a
+                # processed non-skipped slice so resume can continue.
+                bbox_anchor = progress_doc.get('bbox_anchor') or progress_doc.get('bbox_ref')
                 
     if len(flows) == (dataset.domain.exclusive_max[0] - start):
         # Everything appears to have been processed, early exit
+        if bbox_anchor is None:
+            bbox_anchor = bbox_ref
         flows = homogenize_arrays_shape(flows, pad_value=np.nan)
         flows = np.transpose(flows, [1, 0, 2, 3])  # [channels, z, y, x]
         return flows, transform, bbox_ref, bbox_anchor
