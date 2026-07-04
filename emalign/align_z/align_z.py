@@ -334,8 +334,11 @@ def _compute_flow(dataset,
 
         # Transform mov to match ref
         if transformations is None:
-            if z == anchor_z:
-                # This is the first slice, use the anchor bbox
+            if z == anchor_z or bbox_anchor is None:
+                # This is the first slice, or the first valid slice after one
+                # or more leading ignored/empty slices. Use/update the anchor
+                # bbox here so later downsampled flow computation has a valid
+                # bbox_anchor to scale.
                 overlap_ref, overlap_ref_mask, bbox_anchor = get_overlap_ref(ref, 
                                                                             mov, 
                                                                             ref_mask=ref_mask, 
@@ -366,7 +369,7 @@ def _compute_flow(dataset,
             # This gets added at the end of the array
             output_shape = np.array(output_shape) + patch_size
         else:
-            if z == anchor_z:
+            if z == anchor_z or bbox_anchor is None:
                 overlap_ref, overlap_ref_mask, bbox_anchor = get_overlap_ref(ref, 
                                                                         mov, 
                                                                         ref_mask=ref_mask, 
