@@ -203,7 +203,7 @@ def initialize_destination_stores(destination_path, align_plan, save_downsampled
     return destination, destination_mask, ds_destination, ds_project_output_path
 
 
-def execute_alignment(paths, dataset_configs, root_stack, num_workers, wipe_progress_stacks):
+def execute_alignment(paths, dataset_configs, root_stack, num_workers, wipe_progress_stacks, skip_slices_global=None):
     '''Execute the alignment for all datasets.
 
     Args:
@@ -212,7 +212,9 @@ def execute_alignment(paths, dataset_configs, root_stack, num_workers, wipe_prog
         root_stack: Name of the root stack
         num_workers: Number of worker threads
         wipe_progress_stacks: Optional stack name to wipe progress for
+        skip_slices_global: Optional project/global Z slices to skip for every stack
     '''
+    skip_slices_global = sorted(set(skip_slices_global or []))
     for i, path in enumerate(paths):
         for dataset_name in path:
             if dataset_name not in dataset_configs:
@@ -226,6 +228,10 @@ def execute_alignment(paths, dataset_configs, root_stack, num_workers, wipe_prog
 
             config['num_workers'] = num_workers
             config['wipe_progress_flag'] = any([dataset_name == s for s in wipe_progress_stacks])
+            if skip_slices_global:
+                config['skip_slices_global'] = sorted(
+                    set(config.get('skip_slices_global', [])) | set(skip_slices_global)
+                )
 
             # Start alignment
             try:
@@ -247,7 +253,8 @@ def align_dataset_z(project_dir: str,
                     num_workers: int = NUM_WORKERS,
                     save_downsampled: float = DOWNSAMPLE_SCALE,
                     start_over: bool = False,
-                    wipe_progress_stacks: Optional[list[str]] = None) -> None:
+                    wipe_progress_stacks: Optional[list[str]] = None,
+                    skip_slices_global: Optional[list[int]] = None) -> None:
     '''Execute Z alignment using pre-generated configuration files.
 
     Args:
@@ -256,6 +263,7 @@ def align_dataset_z(project_dir: str,
         save_downsampled: Downsampling factor for inspection store
         start_over: Wipe all progress and restart
         wipe_progress_stacks: List of specific stacks to wipe progress for
+        skip_slices_global: Project/global Z slice indices to skip
     '''
     config_dir = os.path.join(project_dir, 'config/z_config')
     if not os.path.exists(config_dir) or not os.listdir(config_dir):
@@ -311,7 +319,7 @@ def align_dataset_z(project_dir: str,
     # Execute alignment
     logging.info('Starting Z alignment...')
     logging.info(f'Number of cores used for rendering: {num_workers}')
-    execute_alignment(paths, dataset_configs, root_stack, num_workers, wipe_progress_stacks)
+    execute_alignment(paths, dataset_configs, root_stack, num_workers, wipe_progress_stacks, skip_slices_global)
 
     logging.info('Done!')
     logging.info(f'Output: {destination_path}')
@@ -358,6 +366,12 @@ if __name__ == '__main__':
                         nargs='+',
                         default=[''],
                         help='Wipe progress for one or more specific stack(s) before starting')
+    parser.add_argument('--skip-slices',
+                        dest='skip_slices_global',
+                        type=int,
+                        nargs='+',
+                        default=[],
+                        help='Project/global Z slice indices to skip during Z alignment and rendering')
 
     args = parser.parse_args()
 
@@ -375,5 +389,6 @@ if __name__ == '__main__':
         num_workers=args.num_workers,
         save_downsampled=args.save_downsampled,
         start_over=args.start_over,
-        wipe_progress_stacks=args.wipe_progress_stacks
+        wipe_progress_stacks=args.wipe_progress_stacks,
+        skip_slices_global=args.skip_slices_global
     )

@@ -50,6 +50,8 @@ def align_stack_z(destination_path,
                   local_z_max=None,
                   xy_offset=[0,0],
                   ignore_slices_flow=[],
+                  skip_slices_global=[],
+                  skip_slices_local=[],
                   save_downsampled=1,
                   overwrite=False,
                   wipe_progress_flag=False,
@@ -122,6 +124,24 @@ def align_stack_z(destination_path,
 
     dataset_mask = open_store(os.path.abspath(dataset_path) + '_mask', mode='r', dtype=ts.bool, allow_missing=True)
     dataset_mask = dataset_mask[dataset.domain] if dataset_mask is not None else dataset_mask
+
+    # Slices can be skipped either in the dataset's local Z coordinates or in
+    # final/global project coordinates.  Flow computation and rendering both
+    # operate on the local TensorStore indices, so normalize everything here.
+    skip_slices_local = set(skip_slices_local or [])
+    skip_slices_global = set(skip_slices_global or [])
+    ignore_slices_flow = set(ignore_slices_flow or [])
+    normalized_skip_slices = ignore_slices_flow | skip_slices_local
+    normalized_skip_slices |= {
+        z - z_offset + dataset.domain.inclusive_min[0]
+        for z in skip_slices_global
+    }
+    normalized_skip_slices = sorted(
+        z for z in normalized_skip_slices
+        if dataset.domain.inclusive_min[0] <= z < dataset.domain.exclusive_max[0]
+    )
+    if normalized_skip_slices:
+        logging.info(f'{dataset_name}: User-requested skipped local slices: {normalized_skip_slices}')
 
     # Make the resolution match the target
     res = attrs['resolution'][-1]
@@ -205,7 +225,7 @@ def align_stack_z(destination_path,
     # Compute flow and save to file
     flow, transform, bbox_ref = compute_flow_dataset(dataset=dataset,
                                                      original_shape=original_shape, 
-                                                     ignore_slices=ignore_slices_flow,
+                                                     ignore_slices=normalized_skip_slices,
                                                      scale=scale, 
                                                      patch_size=patch_size, 
                                                      stride=stride, 
@@ -369,9 +389,16 @@ def align_stack_z(destination_path,
             skipped += 1 # Assume skipped slices are logged correctly
             continue
 
+        global_z = z + z_offset - dataset.domain.inclusive_min[0]
+
+        if z in normalized_skip_slices:
+            skipped += 1
+            metadata = {'skipped': True, 'user_skipped': True, 'empty_slice': False}
+            log_progress(db, dataset_name, step_name, global_z, z, metadata)
+            continue
+
         # Load data
         data = dataset[z].read().result()
-        global_z = z + z_offset - dataset.domain.inclusive_min[0]
 
         if not data.any():
             # If empty slice, skip and go to next z
@@ -486,6 +513,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Align a stack in Z.')
     parser.add_argument('config_file', type=str, help='Path to the JSON configuration file.')
     parser.add_argument('--wipe-progress', action='store_true', help='Wipe progress for the specified stack before starting.')
+    parser.add_argument('--skip-slices-global', nargs='+', type=int, default=[],
+                        help='Project/global Z slice indices to skip during Z alignment and rendering.')
+    parser.add_argument('--skip-slices-local', nargs='+', type=int, default=[],
+                        help='Local input-stack Z slice indices to skip during Z alignment and rendering.')
 
     args = parser.parse_args()
 
@@ -501,5 +532,7 @@ if __name__ == '__main__':
     config['project_name'] = project_name
     config['mongodb_config_filepath'] = mongodb_config_filepath
     config['wipe_progress_flag'] = args.wipe_progress
+    config['skip_slices_global'] = sorted(set(config.get('skip_slices_global', [])) | set(args.skip_slices_global))
+    config['skip_slices_local'] = sorted(set(config.get('skip_slices_local', [])) | set(args.skip_slices_local))
 
     align_stack_z(**config)

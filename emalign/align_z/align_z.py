@@ -199,18 +199,27 @@ def _compute_flow(dataset,
         if check_progress(db, dataset_name, step_name, z, doc_filter={'scale': scale}):
             flows.append(dataset_flow[z].read().result())
             transform[z] = dataset_trsf[z].read().result() if transformations is None else transformations[z]
+            progress_doc = db[dataset_name].find_one(
+                {'step_name': step_name, 'local_slice': z, 'scale': scale},
+                {'bbox_anchor': 1, 'bbox_ref': 1}
+            ) or {}
 
             if z == anchor_z and bbox_anchor is None:
                 # Get bbox from previous slices (should be passed but take it for return)
-                bbox_anchor = db[dataset_name].find_one({'step_name': step_name, 'local_slice': z, 'scale': scale}, 
-                                                        {'bbox_anchor': 1})['bbox_anchor']
+                bbox_anchor = progress_doc.get('bbox_anchor') or progress_doc.get('bbox_ref')
             elif z > anchor_z and bbox_ref is None:
                 # Get bbox from previous slices
-                bbox_ref = db[dataset_name].find_one({'step_name': step_name, 'local_slice': z, 'scale': scale}, 
-                                                     {'bbox_ref': 1})['bbox_ref']
+                bbox_ref = progress_doc.get('bbox_ref')
+            if z > anchor_z and bbox_anchor is None:
+                # Older progress docs for leading skipped slices may not have
+                # bbox_anchor. Fall back to the first available bbox from a
+                # processed non-skipped slice so resume can continue.
+                bbox_anchor = progress_doc.get('bbox_anchor') or progress_doc.get('bbox_ref')
                 
     if len(flows) == (dataset.domain.exclusive_max[0] - start):
         # Everything appears to have been processed, early exit
+        if bbox_anchor is None:
+            bbox_anchor = bbox_ref
         flows = homogenize_arrays_shape(flows, pad_value=np.nan)
         flows = np.transpose(flows, [1, 0, 2, 3])  # [channels, z, y, x]
         return flows, transform, bbox_ref, bbox_anchor
@@ -260,13 +269,25 @@ def _compute_flow(dataset,
     #---------- Start processing ----------#
     mfc = flow_field.JAXMaskedXCorrWithStatsCalculator()
 
+    pending_invalid_flows = 0
+
+    def append_invalid_flow():
+        nonlocal pending_invalid_flows
+        if flows:
+            flows.append(np.ones_like(flows[-1]) * np.nan)
+        else:
+            # Flow shape is only known after the first valid pair is computed.
+            # Keep leading skipped/empty slices pending and backfill them once
+            # a real flow exists instead of indexing flows[-1].
+            pending_invalid_flows += 1
+
     pbar = tqdm(range(start, dataset.domain.exclusive_max[0]), position=0, dynamic_ncols=True)
     for z in pbar:
         if z in ignore_slices:
             pbar.set_description(f'{dataset_name}: Ignoring slice...')
             # Slice is to be ignored for flow computation based on user input.
             # These should not be used for mesh relaxation or they will bias the result, so we set them as invalid.
-            flows.append(np.ones_like(flows[-1]) * np.nan)
+            append_invalid_flow()
             
             metadata = {
                 'ref_dataset': ref_dataset_name,
@@ -286,7 +307,7 @@ def _compute_flow(dataset,
         # If empty slice, skip and compare to next one
         if not mov.any():
             # We should be starting with a non-empty slice, so by the time we hit this, flow should exist
-            flows.append(np.ones_like(flows[-1]) * np.nan)
+            append_invalid_flow()
             metadata = {
                 'ref_dataset': ref_dataset_name,
                 'scale': scale,
@@ -322,8 +343,11 @@ def _compute_flow(dataset,
 
         # Transform mov to match ref
         if transformations is None:
-            if z == anchor_z:
-                # This is the first slice, use the anchor bbox
+            if z == anchor_z or bbox_anchor is None:
+                # This is the first slice, or the first valid slice after one
+                # or more leading ignored/empty slices. Use/update the anchor
+                # bbox here so later downsampled flow computation has a valid
+                # bbox_anchor to scale.
                 overlap_ref, overlap_ref_mask, bbox_anchor = get_overlap_ref(ref, 
                                                                             mov, 
                                                                             ref_mask=ref_mask, 
@@ -354,7 +378,7 @@ def _compute_flow(dataset,
             # This gets added at the end of the array
             output_shape = np.array(output_shape) + patch_size
         else:
-            if z == anchor_z:
+            if z == anchor_z or bbox_anchor is None:
                 overlap_ref, overlap_ref_mask, bbox_anchor = get_overlap_ref(ref, 
                                                                         mov, 
                                                                         ref_mask=ref_mask, 
@@ -384,6 +408,9 @@ def _compute_flow(dataset,
         # Compute flow
         flow = _compute_flow_slice(overlap_ref, overlap_ref_mask, 
                                    mov, mov_mask, mfc, patch_size, stride)
+        if pending_invalid_flows:
+            flows.extend([np.ones_like(flow) * np.nan] * pending_invalid_flows)
+            pending_invalid_flows = 0
         flows.append(flow)
 
         # Save to file + database
@@ -420,6 +447,11 @@ def _compute_flow(dataset,
             z_ref = z
 
     jax.clear_caches()
+
+    if pending_invalid_flows:
+        raise ValueError(
+            f'{dataset_name}: no valid slices were available after applying ignored/empty slices.'
+        )
 
     flows = homogenize_arrays_shape(flows, pad_value=np.nan)
     flows = np.transpose(flows, [1, 0, 2, 3])  # [channels, z, y, x]
