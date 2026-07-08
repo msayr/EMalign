@@ -1,4 +1,5 @@
 import numpy as np
+import warnings
 
 from sofima import warp
 
@@ -6,6 +7,14 @@ from emalign.io.process.mask import mask_to_bbox
 
 from .utils import check_stitch
 from ..io.store import write_data
+
+
+def _max_expected_canvas_shape(tile_map, max_canvas_scale):
+    '''Return the largest acceptable stitched YX shape for an on-grid tile map.'''
+    tile_keys = np.array(list(tile_map.keys()))
+    tile_space = np.array([tile_keys[:, 1].max() + 1, tile_keys[:, 0].max() + 1])
+    max_tile_shape = np.max([tile.shape for tile in tile_map.values()], axis=0)
+    return np.ceil(tile_space * max_tile_shape * max_canvas_scale).astype(int)
 
 
 def render_slice_xy(destination,
@@ -20,6 +29,7 @@ def render_slice_xy(destination,
                     return_render=False,
                     resize_canvas=True,
                     min_stitch_score=0,
+                    max_canvas_scale=1.25,
                     **kwargs):
     '''Render an aligned image from a tile map.
 
@@ -39,6 +49,9 @@ def render_slice_xy(destination,
         dest_mask (_type_, optional): Zarr store where to write aligned slice's mask. Defaults to None.
         return_render (bool, optional): Whether to return the aligned image rather than writing it. Defaults to False.
         resize_canvas (bool, optional): Whether the image to the size of a bounding box defined by the mask. Defaults to True.
+        max_canvas_scale (float or None, optional): Maximum allowed rendered canvas size as a multiple of the
+            tile grid's unaligned bounding box. If the alignment moves tiles so far that the cropped mask bounding
+            box exceeds this limit, the stitch is treated as failed and no data is written. Set to None to disable.
         **kwargs (optional): Additional arguments passed to warp.render_tiles. 
             e.g.: margin_overrides provides specific margins per direction per tile.
 
@@ -71,6 +84,15 @@ def render_slice_xy(destination,
         y1,y2,x1,x2 = mask_to_bbox(mask)
         stitched = stitched[y1:y2,x1:x2]
         mask = mask[y1:y2,x1:x2]
+
+    if max_canvas_scale is not None:
+        max_shape = _max_expected_canvas_shape(tile_map, max_canvas_scale)
+        if np.any(np.array(stitched.shape) > max_shape):
+            warnings.warn(
+                'Rendered XY canvas exceeds allowed size; treating stitch as failed. '
+                f'Got YX shape {stitched.shape}, maximum allowed {tuple(map(int, max_shape))}.'
+            )
+            stitch_score = np.zeros_like(np.atleast_1d(stitch_score), dtype=float).tolist()
 
     if return_render:
         return stitched, stitch_score

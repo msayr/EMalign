@@ -130,7 +130,8 @@ def fuse_stacks_group(config,
                       target_res=None,
                       overwrite=False,
                       wipe_progress_flag=False,
-                      num_workers=1):
+                      num_workers=1,
+                      max_canvas_scale=1.5):
     '''Fuse a group of stacks that overlap on the XY plane.
 
     Args:
@@ -148,6 +149,8 @@ def fuse_stacks_group(config,
         overwrite (bool, optional): Whether to delete destination and start over. Defaults to False.
         wipe_progress_flag (bool): Whether to wipe progress for the stack. Defaults to False.
         num_workers (int, optional): Number of threads used to render the final image by `sofima.warp.ndimage_warp`. Defaults to 1.
+        max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the
+            larger input image. Set to None to disable. Defaults to 1.5.
     '''
 
 
@@ -304,6 +307,7 @@ def fuse_stacks_group(config,
                                                     parallelism=num_workers,
                                                     img_on_top=img_on_top,
                                                     img_q_fun=img_q_fun,
+                                                    max_canvas_scale=max_canvas_scale,
                                                     k0=k0,
                                                     k=k,
                                                     gamma=gamma)
@@ -341,7 +345,8 @@ def fuse_stacks_group(config,
             'failed_images': failed_images,
             'failed_alignment_log_path': failed_alignment_log_path,
             'scale': scale,
-            'img_on_top': img_on_top
+            'img_on_top': img_on_top,
+            'max_canvas_scale': max_canvas_scale
                 }
         log_progress(db, destination_name, step_name, global_slice_index, z, metadata)
 
@@ -363,7 +368,8 @@ def align_fused_stacks_xy(config_path,
                           img_on_top='auto',
                           overwrite=False,
                           wipe_progress_stack=None,
-                          num_workers=1):
+                          num_workers=1,
+                          max_canvas_scale=1.5):
     '''Align groups of overlapping stacks one after the other.
 
     Args:
@@ -375,6 +381,7 @@ def align_fused_stacks_xy(config_path,
         overwrite (bool, optional): _description_. Defaults to False.
         wipe_progress_stack (str, optional): Name of the stack to wipe progress for. Defaults to None.
         num_workers (int, optional): _description_. Defaults to 1.
+        max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the larger input image.
     '''
     
     with open(config_path, 'r') as f:
@@ -413,7 +420,8 @@ def align_fused_stacks_xy(config_path,
                           img_q_fun=img_q_fun, 
                           overwrite=overwrite,
                           wipe_progress_flag=wipe_this_stack,
-                          num_workers=num_workers)
+                          num_workers=num_workers,
+                          max_canvas_scale=max_canvas_scale)
     logging.info(f'All {len(fused_configs)} stacks were fused!')
 
 
@@ -441,10 +449,16 @@ if __name__ == '__main__':
                         type=str,
                         default=None,
                         help='Wipe progress for a specific stack before starting.')
+    parser.add_argument('--max-canvas-scale',
+                        dest='max_canvas_scale',
+                        type=float,
+                        default=1.5,
+                        help='Maximum fused XY canvas shape as a multiple of the larger input image. Default: 1.5')
 
     args = parser.parse_args()
 
     align_fused_stacks_xy(config_path=args.config_path,
                           num_workers=args.num_workers,
                           overwrite=args.overwrite,
-                          wipe_progress_stack=args.wipe_progress_stack)
+                          wipe_progress_stack=args.wipe_progress_stack,
+                          max_canvas_scale=args.max_canvas_scale)
