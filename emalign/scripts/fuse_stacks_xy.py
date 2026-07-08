@@ -76,6 +76,12 @@ def has_completed_fuse_progress(db, collection_name, step_name, local_slice_inde
     return collection.count_documents(completed_filter) > 0
 
 
+def is_fuse_config(config):
+    """Return True when a JSON object has the required fused-stack config fields."""
+    required_fields = {'zmin', 'zmax', 'z_offsets', 'dataset_paths'}
+    return isinstance(config, dict) and required_fields.issubset(config)
+
+
 def get_fused_configs(
         main_config_path,
         scale=0.1
@@ -94,7 +100,7 @@ def get_fused_configs(
     output_dir = os.path.dirname(os.path.abspath(main_config_path))
 
     # Check for existing files
-    config_filepaths = glob(os.path.join(output_dir, 'fuse_xy*.json'))
+    config_filepaths = glob(os.path.join(output_dir, 'fuse_xy_*.json'))
 
     if len(config_filepaths) == 0:
         # Compute and write configuration files
@@ -112,7 +118,11 @@ def get_fused_configs(
         pbar = tqdm(config_filepaths, position=0, desc='Loading existing configurations')
         for filepath in pbar:
             with open(filepath, 'r') as f:
-                overlapping_groups.append(json.load(f))
+                config = json.load(f)
+            if is_fuse_config(config):
+                overlapping_groups.append(config)
+            else:
+                logging.warning('Ignoring non-fuse-stack configuration file: %s', filepath)
 
     logging.info(f'Found {len(overlapping_groups)} segments of stacks.')
     return overlapping_groups
