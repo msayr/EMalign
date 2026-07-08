@@ -58,6 +58,15 @@ def summarize_failed_fuse_record(record):
     return {k: v for k, v in record.items() if k != 'traceback'}
 
 
+def has_fuse_progress(db, collection_name, step_name, local_slice_index):
+    """Return True when a fuse slice has any progress record."""
+    collection = db[collection_name]
+    return collection.count_documents({
+        'step_name': step_name,
+        'local_slice': local_slice_index,
+    }) > 0
+
+
 def has_completed_fuse_progress(db, collection_name, step_name, local_slice_index):
     """Return True only when a fuse slice has a completed progress record."""
     collection = db[collection_name]
@@ -130,6 +139,7 @@ def fuse_stacks_group(config,
                       target_res=None,
                       overwrite=False,
                       wipe_progress_flag=False,
+                      retry_missing_slices=True,
                       num_workers=1,
                       max_canvas_scale=1.5):
     '''Fuse a group of stacks that overlap on the XY plane.
@@ -148,6 +158,8 @@ def fuse_stacks_group(config,
             Defaults to None.
         overwrite (bool, optional): Whether to delete destination and start over. Defaults to False.
         wipe_progress_flag (bool): Whether to wipe progress for the stack. Defaults to False.
+        retry_missing_slices (bool): Whether to retry slices with incomplete progress records.
+            If False, any slice with an existing progress record is skipped. Defaults to True.
         num_workers (int, optional): Number of threads used to render the final image by `sofima.warp.ndimage_warp`. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the
             larger input image. Set to None to disable. Defaults to 1.5.
@@ -248,9 +260,13 @@ def fuse_stacks_group(config,
     pbarz = tqdm(range(z_shape), position=1)
     for z in pbarz:
         global_slice_index = z + config['zmin']
-        if has_completed_fuse_progress(db, destination_name, step_name, z) and not overwrite:
-            pbarz.set_description(f'Skipping {z}...')
-            continue
+        if not overwrite:
+            if has_completed_fuse_progress(db, destination_name, step_name, z):
+                pbarz.set_description(f'Skipping completed {z}...')
+                continue
+            if not retry_missing_slices and has_fuse_progress(db, destination_name, step_name, z):
+                pbarz.set_description(f'Skipping previously attempted {z}...')
+                continue
         pbarz.set_description(f'Fusing stacks...')
         canvas = None
         canvas_mask = None
@@ -368,6 +384,7 @@ def align_fused_stacks_xy(config_path,
                           img_on_top='auto',
                           overwrite=False,
                           wipe_progress_stack=None,
+                          retry_missing_slices=True,
                           num_workers=1,
                           max_canvas_scale=1.5):
     '''Align groups of overlapping stacks one after the other.
@@ -380,6 +397,7 @@ def align_fused_stacks_xy(config_path,
         img_on_top (str, optional): _description_. Defaults to 'auto'.
         overwrite (bool, optional): _description_. Defaults to False.
         wipe_progress_stack (str, optional): Name of the stack to wipe progress for. Defaults to None.
+        retry_missing_slices (bool): Whether to retry slices with incomplete progress records. Defaults to True.
         num_workers (int, optional): _description_. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the larger input image.
     '''
@@ -420,6 +438,7 @@ def align_fused_stacks_xy(config_path,
                           img_q_fun=img_q_fun, 
                           overwrite=overwrite,
                           wipe_progress_flag=wipe_this_stack,
+                          retry_missing_slices=retry_missing_slices,
                           num_workers=num_workers,
                           max_canvas_scale=max_canvas_scale)
     logging.info(f'All {len(fused_configs)} stacks were fused!')
@@ -449,6 +468,11 @@ if __name__ == '__main__':
                         type=str,
                         default=None,
                         help='Wipe progress for a specific stack before starting.')
+    parser.add_argument('--no-retry-missing-slices',
+                        dest='retry_missing_slices',
+                        action='store_false',
+                        help='Skip slices with any existing progress record, including incomplete slices. Default: retry incomplete slices.')
+    parser.set_defaults(retry_missing_slices=True)
     parser.add_argument('--max-canvas-scale',
                         dest='max_canvas_scale',
                         type=float,
@@ -461,4 +485,5 @@ if __name__ == '__main__':
                           num_workers=args.num_workers,
                           overwrite=args.overwrite,
                           wipe_progress_stack=args.wipe_progress_stack,
+                          retry_missing_slices=args.retry_missing_slices,
                           max_canvas_scale=args.max_canvas_scale)
