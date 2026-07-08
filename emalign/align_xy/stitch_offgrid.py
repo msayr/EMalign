@@ -24,6 +24,31 @@ class TransformEstimationError(RuntimeError):
     """Raised when SIFT cannot estimate an affine transform for image stitching."""
 
 
+class CanvasSizeError(RuntimeError):
+    """Raised when a fused stitch would create an implausibly large canvas."""
+
+
+def _max_fused_canvas_shape(img1_shape, img2_shape, max_canvas_scale):
+    """Return the largest acceptable YX shape for fusing overlapping stack images."""
+    return np.ceil(np.maximum(img1_shape, img2_shape) * max_canvas_scale).astype(int)
+
+
+def _raise_if_canvas_too_large(candidate_shape, img1_shape, img2_shape, max_canvas_scale, stage):
+    """Reject runaway affine/elastic transforms before a massive canvas is allocated or written."""
+    if max_canvas_scale is None:
+        return
+
+    max_shape = _max_fused_canvas_shape(img1_shape, img2_shape, max_canvas_scale)
+    candidate_shape = np.array(candidate_shape)
+    if np.any(candidate_shape > max_shape):
+        raise CanvasSizeError(
+            f'Fused XY canvas exceeds allowed size during {stage}. '
+            f'Got YX shape {tuple(map(int, candidate_shape))}, maximum allowed '
+            f'{tuple(map(int, max_shape))} from input shapes '
+            f'{tuple(map(int, img1_shape))} and {tuple(map(int, img2_shape))}.'
+        )
+
+
 def get_elastic_mesh(pre, 
                      post, 
                      pre_mask, 
@@ -70,6 +95,8 @@ def render_fused_slice(pre,
                        output_shape=None,
                        post_on_top=False,
                        resize_canvas=True,
+                       max_canvas_scale=1.5,
+                       expected_shape=None,
                        
                        ):
     
@@ -119,6 +146,15 @@ def render_fused_slice(pre,
         y1,y2,x1,x2 = mask_to_bbox(stitched_mask)
         stitched = stitched[y1:y2,x1:x2]
         stitched_mask = stitched_mask[y1:y2,x1:x2]
+
+    if expected_shape is not None:
+        _raise_if_canvas_too_large(
+            stitched.shape,
+            expected_shape[0],
+            expected_shape[1],
+            max_canvas_scale,
+            'elastic render',
+        )
     return stitched, stitched_mask
 
 
@@ -133,6 +169,7 @@ def stitch_images(img1,
                   img_on_top='auto',
                   img_q_fun=None,
                   resize_canvas=True,
+                  max_canvas_scale=1.5,
                   **kwargs):
     
     '''Stitch two images on the same slice. 
@@ -143,6 +180,9 @@ def stitch_images(img1,
     img_q_fun: function taking image and mask as arguments, returns a value higher for higher quality/sharpness.
     e.g.: img_q_fun = lambda img, m: compute_laplacian_var(img, m)*0.5 + compute_sobel_mean(img, m) + compute_grad_mag(img, m)*100
     '''
+
+    original_img1_shape = np.array(img1.shape)
+    original_img2_shape = np.array(img2.shape)
 
     # Compute mask if not provided
     if mask1 is None:
@@ -167,14 +207,39 @@ def stitch_images(img1,
             f'(scale={scale}, robust_estimate={robust_estimate}, '
             f'robustness_metrics={robustness_metrics}).'
         )
+    _raise_if_canvas_too_large(
+        img1_shape,
+        original_img1_shape,
+        original_img2_shape,
+        max_canvas_scale,
+        'affine warp',
+    )
+
+    # Pad moving image so it matches the reference
+    padded_img2_shape = np.array(img2.shape) + np.sum(xy_offset_to_pad(img2_offset), axis=1)
+    _raise_if_canvas_too_large(
+        padded_img2_shape,
+        original_img1_shape,
+        original_img2_shape,
+        max_canvas_scale,
+        'moving-image padding',
+    )
+
     img1 = cv2.warpAffine(img1, M, img1_shape[::-1])  
     mask1 = cv2.warpAffine(mask1.astype(np.uint8), M, img1_shape[::-1]).astype(bool)
 
-    # Pad moving image so it matches the reference
     img2 = np.pad(img2, xy_offset_to_pad(img2_offset))
     mask2 = np.pad(mask2, xy_offset_to_pad(img2_offset))
 
     # Make sure that images have the same shape for sofima
+    homogenized_shape = np.maximum(img1.shape, img2.shape)
+    _raise_if_canvas_too_large(
+        homogenized_shape,
+        original_img1_shape,
+        original_img2_shape,
+        max_canvas_scale,
+        'shape homogenization',
+    )
     img1, img2 = homogenize_arrays_shape([img1, img2])
     mask1, mask2 = homogenize_arrays_shape([mask1, mask2])
 
@@ -219,4 +284,6 @@ def stitch_images(img1,
                               overlap=5,
                               parallelism=parallelism,
                               post_on_top=post_on_top,
-                              resize_canvas=resize_canvas)
+                              resize_canvas=resize_canvas,
+                              max_canvas_scale=max_canvas_scale,
+                              expected_shape=(original_img1_shape, original_img2_shape))
