@@ -23,6 +23,7 @@ os.environ['MKL_NUM_THREADS'] = '4'
 import argparse
 import logging
 import numpy as np
+import shutil
 import sys
 
 from inspect import signature
@@ -43,6 +44,143 @@ CHUNK_SIZE = [1, 1024, 1024]  # For store creation
 NUM_WORKERS = 1
 DOWNSAMPLE_SCALE = 10  # For creation of the downsampled inspection store
 Z_RESOLUTION = 50 # nm
+
+
+def _mask_union_bbox(mask_store, chunk_z: int = 64):
+    """Return the YX bounding box containing all True pixels in a 3D mask store.
+
+    The returned tuple is (y_min, y_max, x_min, x_max), with max values exclusive.
+    Pixels outside this box are black/invalid for every slice in the aligned stack
+    and can be cropped away without removing image data.
+    """
+    z_max, store_y_max, store_x_max = map(int, mask_store.shape)
+    y_min = store_y_max
+    x_min = store_x_max
+    y_max_data = 0
+    x_max_data = 0
+    found = False
+
+    for z0 in range(0, z_max, chunk_z):
+        z1 = min(z0 + chunk_z, z_max)
+        block = mask_store[z0:z1].read().result()
+        if not block.any():
+            continue
+
+        _, yy, xx = np.nonzero(block)
+        y_min = min(y_min, int(yy.min()))
+        x_min = min(x_min, int(xx.min()))
+        y_max_data = max(y_max_data, int(yy.max()) + 1)
+        x_max_data = max(x_max_data, int(xx.max()) + 1)
+        found = True
+
+    if not found:
+        return None
+    return y_min, y_max_data, x_min, x_max_data
+
+
+def _copy_cropped_store(src_store, dst_path, bbox, dtype, chunks=CHUNK_SIZE):
+    """Copy a YX crop from src_store into a newly-created destination store."""
+    y1, y2, x1, x2 = bbox
+    shape = [int(src_store.shape[0]), int(y2 - y1), int(x2 - x1)]
+    dst = open_store(dst_path, mode='w', dtype=dtype, shape=shape,
+                     chunks=[min(chunks[0], shape[0]), min(chunks[1], shape[1]), min(chunks[2], shape[2])])
+
+    for z0 in range(0, shape[0], max(1, chunks[0])):
+        z1 = min(z0 + max(1, chunks[0]), shape[0])
+        data = src_store[z0:z1, y1:y2, x1:x2].read().result()
+        dst[z0:z1, :data.shape[1], :data.shape[2]].write(data).result()
+
+    return dst
+
+
+def crop_aligned_stack_borders(destination_path: str, save_downsampled: float,
+                               project_name: str) -> Optional[tuple[int, int, int, int]]:
+    """Crop fully black YX borders from the aligned output stack and mask.
+
+    The valid-data mask is accumulated across the full stack. The output image,
+    mask, and optional downsampled inspection store are rewritten to the smallest
+    common YX canvas containing any valid pixel in any slice.
+    """
+    import tensorstore as ts
+
+    destination = open_store(destination_path, mode='r', dtype=ts.uint8)
+    destination_mask = open_store(destination_path + '_mask', mode='r', dtype=ts.bool)
+    bbox = _mask_union_bbox(destination_mask)
+
+    if bbox is None:
+        logging.warning('Skipping crop: destination mask contains no valid pixels.')
+        return None
+
+    y1, y2, x1, x2 = bbox
+    old_shape = tuple(map(int, destination.shape))
+    new_shape = (old_shape[0], y2 - y1, x2 - x1)
+    if new_shape == old_shape:
+        logging.info('Skipping crop: no fully black stack border found.')
+        return bbox
+
+    logging.info('Cropping aligned stack from shape %s to %s using YX bbox %s.', old_shape, new_shape, bbox)
+
+    paths_to_replace = []
+    tmp_destination_path = destination_path + '.crop_tmp'
+    tmp_mask_path = destination_path + '_mask.crop_tmp'
+    for path in (tmp_destination_path, tmp_mask_path):
+        if os.path.exists(path):
+            shutil.rmtree(path)
+
+    cropped_destination = _copy_cropped_store(destination, tmp_destination_path, bbox, ts.uint8)
+    cropped_mask = _copy_cropped_store(destination_mask, tmp_mask_path, bbox, ts.bool)
+
+    def _cropped_attrs(store, crop_y, crop_x, uncropped_shape, crop_bbox):
+        cropped_attrs = get_store_attributes(store)
+        cropped_attrs['uncropped_shape'] = list(map(int, uncropped_shape))
+        cropped_attrs['crop_bbox_yx'] = [int(v) for v in crop_bbox]
+        if 'voxel_offset' in cropped_attrs:
+            cropped_attrs['voxel_offset'][1] += int(crop_y)
+            cropped_attrs['voxel_offset'][2] += int(crop_x)
+        if 'offset' in cropped_attrs and 'resolution' in cropped_attrs:
+            cropped_attrs['offset'][1] += int(crop_y) * cropped_attrs['resolution'][1]
+            cropped_attrs['offset'][2] += int(crop_x) * cropped_attrs['resolution'][2]
+        return cropped_attrs
+
+    attrs = _cropped_attrs(destination, y1, x1, old_shape, bbox)
+    set_store_attributes(cropped_destination, attrs)
+    if os.path.exists(os.path.join(destination_path + '_mask', '.zattrs')):
+        mask_attrs = _cropped_attrs(destination_mask, y1, x1, old_shape, bbox)
+    else:
+        mask_attrs = attrs.copy()
+    set_store_attributes(cropped_mask, mask_attrs)
+    paths_to_replace.extend([(tmp_destination_path, destination_path), (tmp_mask_path, destination_path + '_mask')])
+
+    if save_downsampled != 1:
+        ds_project_output_path = os.path.join(os.path.dirname(destination_path), f'{int(save_downsampled)}x_{project_name}')
+        if os.path.exists(ds_project_output_path):
+            ds_destination = open_store(ds_project_output_path, mode='r', dtype=ts.uint8)
+            ds_bbox = (int(np.floor(y1 / save_downsampled)), int(np.ceil(y2 / save_downsampled)),
+                       int(np.floor(x1 / save_downsampled)), int(np.ceil(x2 / save_downsampled)))
+            ds_bbox = (max(0, ds_bbox[0]), min(int(ds_destination.shape[1]), ds_bbox[1]),
+                       max(0, ds_bbox[2]), min(int(ds_destination.shape[2]), ds_bbox[3]))
+            tmp_ds_path = ds_project_output_path + '.crop_tmp'
+            if os.path.exists(tmp_ds_path):
+                shutil.rmtree(tmp_ds_path)
+            cropped_ds = _copy_cropped_store(ds_destination, tmp_ds_path, ds_bbox, ts.uint8)
+            ds_attrs = _cropped_attrs(ds_destination, ds_bbox[0], ds_bbox[2], ds_destination.shape, ds_bbox)
+            set_store_attributes(cropped_ds, ds_attrs)
+            paths_to_replace.append((tmp_ds_path, ds_project_output_path))
+            del ds_destination, cropped_ds
+
+    del destination, destination_mask, cropped_destination, cropped_mask
+
+    for tmp_path, final_path in paths_to_replace:
+        backup_path = final_path + '.uncropped_backup'
+        if os.path.exists(backup_path):
+            shutil.rmtree(backup_path)
+        os.replace(final_path, backup_path)
+        os.replace(tmp_path, final_path)
+        shutil.rmtree(backup_path)
+
+    logging.info('Cropped fully black aligned-stack borders: top=%d, bottom=%d, left=%d, right=%d.',
+                 y1, old_shape[1] - y2, x1, old_shape[2] - x2)
+    return bbox
 
 
 def load_and_validate_configs(config_dir):
@@ -247,7 +385,8 @@ def align_dataset_z(project_dir: str,
                     num_workers: int = NUM_WORKERS,
                     save_downsampled: float = DOWNSAMPLE_SCALE,
                     start_over: bool = False,
-                    wipe_progress_stacks: Optional[list[str]] = None) -> None:
+                    wipe_progress_stacks: Optional[list[str]] = None,
+                    crop_black_borders: bool = True) -> None:
     '''Execute Z alignment using pre-generated configuration files.
 
     Args:
@@ -256,6 +395,7 @@ def align_dataset_z(project_dir: str,
         save_downsampled: Downsampling factor for inspection store
         start_over: Wipe all progress and restart
         wipe_progress_stacks: List of specific stacks to wipe progress for
+        crop_black_borders: Crop YX borders that are black/invalid in every slice after alignment
     '''
     config_dir = os.path.join(project_dir, 'config/z_config')
     if not os.path.exists(config_dir) or not os.listdir(config_dir):
@@ -313,6 +453,10 @@ def align_dataset_z(project_dir: str,
     logging.info(f'Number of cores used for rendering: {num_workers}')
     execute_alignment(paths, dataset_configs, root_stack, num_workers, wipe_progress_stacks)
 
+    if crop_black_borders:
+        logging.info('Cropping fully black borders from aligned stack...')
+        crop_aligned_stack_borders(destination_path, save_downsampled, project_name)
+
     logging.info('Done!')
     logging.info(f'Output: {destination_path}')
     logging.info(f'Downsampled: {ds_project_output_path}')
@@ -358,6 +502,11 @@ if __name__ == '__main__':
                         nargs='+',
                         default=[''],
                         help='Wipe progress for one or more specific stack(s) before starting')
+    parser.add_argument('--no-crop-black-borders',
+                        dest='crop_black_borders',
+                        default=True,
+                        action='store_false',
+                        help='Disable final crop of borders that are black/invalid in every aligned slice')
 
     args = parser.parse_args()
 
@@ -375,5 +524,6 @@ if __name__ == '__main__':
         num_workers=args.num_workers,
         save_downsampled=args.save_downsampled,
         start_over=args.start_over,
-        wipe_progress_stacks=args.wipe_progress_stacks
+        wipe_progress_stacks=args.wipe_progress_stacks,
+        crop_black_borders=args.crop_black_borders
     )
