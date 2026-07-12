@@ -180,11 +180,14 @@ def extract_paths_from_root(G, root_node):
 def compute_alignment_path(datasets,
                            z_offsets,
                            target_resolution,
-                           scale=0.2):
-    '''Compute alignment paths between overlapping datasets using SIFT feature matching.
+                           scale=0.2,
+                           verify_sift=False):
+    '''Compute alignment paths between overlapping datasets.
 
     Analyzes Z-overlap between datasets and builds a graph where edges represent
-    valid alignment transitions (verified by SIFT matching at slice boundaries).
+    valid alignment transitions. By default, transitions are inferred from Z
+    overlap only; optional SIFT verification can be enabled for smaller datasets
+    where the additional feature matching cost is acceptable.
     Returns paths from a root dataset (one with no overlap) to all other datasets.
 
     Args:
@@ -192,6 +195,9 @@ def compute_alignment_path(datasets,
         z_offsets (np.ndarray): Array of shape (N, 3) with [z, y, x] voxel offsets for each dataset.
         target_resolution (int or list): Target resolution in nm for SIFT matching. If int, used for both Y and X.
         scale (float, optional): Scale factor for SIFT feature detection. Defaults to 0.2.
+        verify_sift (bool, optional): If True, verify each candidate transition
+            with SIFT. Defaults to False to avoid expensive full-stack config
+            preparation stalls on large EM slices.
 
     Raises:
         RuntimeError: If no root dataset is found (all datasets have Z overlap).
@@ -266,10 +272,16 @@ def compute_alignment_path(datasets,
     root_node_idx = root_datasets.iloc[0][0]
     root_node = dataset_names[root_node_idx]
 
-    # Compute valid alignment paths
+    # Compute valid alignment paths.  The Z configuration step only needs a
+    # sensible predecessor/successor plan; the actual Z alignment validates image
+    # content later.  Running SIFT here can be prohibitively expensive because it
+    # touches boundary slices for every candidate transition before any config is
+    # written.  Keep SIFT as an opt-in diagnostic, but default to Z-overlap graph
+    # construction so prep_config_z remains fast and predictable.
     G = nx.Graph()
     G.add_nodes_from(np.unique(np.concatenate(df.ds_indices)).tolist())
     grouped = df.groupby('group')
+    sift_checks = 0
     for g, curr_group in grouped:
         if g == df.group.max():
             break
@@ -278,7 +290,18 @@ def compute_alignment_path(datasets,
             for v in next_group.ds_indices.iloc[0]:
                 if u == v:
                     continue  # same dataset spans both groups — no inter-dataset transition needed
-                # Check for match at the boundary of the relevant range
+                if not verify_sift:
+                    G.add_edge(u, v, valid_estimate=None)
+                    continue
+
+                # Check for match at the boundary of the relevant range.
+                sift_checks += 1
+                logging.info(
+                    'Verifying alignment-path edge %s -> %s with SIFT (%d checks so far)',
+                    dataset_names[u],
+                    dataset_names[v],
+                    sift_checks,
+                )
                 ref = _get_slice(datasets_nomask[u], curr_group.z.max() - z_offsets[u, 0], reverse=True)
                 mov = _get_slice(datasets_nomask[v], next_group.z.min() - z_offsets[v, 0], reverse=False)
                 M, out_shape, ref_offset, valid_estimate, _ = estimate_transform_sift(ref.copy(), mov.copy(),
