@@ -261,12 +261,21 @@ def _compute_flow(dataset,
     mfc = flow_field.JAXMaskedXCorrWithStatsCalculator()
 
     pbar = tqdm(range(start, dataset.domain.exclusive_max[0]), position=0, dynamic_ncols=True)
+
+    def append_invalid_flow(z):
+        if flows:
+            invalid_flow = np.ones_like(flows[-1]) * np.nan
+        else:
+            invalid_flow = np.full((4, 1, 1), np.nan, dtype=np.float32)
+        flows.append(invalid_flow)
+        return write_ndarray(dataset_flow, invalid_flow, z, resolve=True)[0]
+
     for z in pbar:
         if z in ignore_slices:
             pbar.set_description(f'{dataset_name}: Ignoring slice...')
             # Slice is to be ignored for flow computation based on user input.
             # These should not be used for mesh relaxation or they will bias the result, so we set them as invalid.
-            flows.append(np.ones_like(flows[-1]) * np.nan)
+            dataset_flow = append_invalid_flow(z)
             
             metadata = {
                 'ref_dataset': ref_dataset_name,
@@ -285,8 +294,8 @@ def _compute_flow(dataset,
 
         # If empty slice, skip and compare to next one
         if not mov.any():
-            # We should be starting with a non-empty slice, so by the time we hit this, flow should exist
-            flows.append(np.ones_like(flows[-1]) * np.nan)
+            # Empty slices have invalid flow and should not bias mesh relaxation.
+            dataset_flow = append_invalid_flow(z)
             metadata = {
                 'ref_dataset': ref_dataset_name,
                 'scale': scale,
