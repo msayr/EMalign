@@ -200,14 +200,15 @@ def _compute_flow(dataset,
             flows.append(dataset_flow[z].read().result())
             transform[z] = dataset_trsf[z].read().result() if transformations is None else transformations[z]
 
-            if z == anchor_z and bbox_anchor is None:
-                # Get bbox from previous slices (should be passed but take it for return)
-                bbox_anchor = db[dataset_name].find_one({'step_name': step_name, 'local_slice': z, 'scale': scale}, 
-                                                        {'bbox_anchor': 1})['bbox_anchor']
-            elif z > anchor_z and bbox_ref is None:
-                # Get bbox from previous slices
-                bbox_ref = db[dataset_name].find_one({'step_name': step_name, 'local_slice': z, 'scale': scale}, 
-                                                     {'bbox_ref': 1})['bbox_ref']
+            progress_doc = db[dataset_name].find_one(
+                {'step_name': step_name, 'local_slice': z, 'scale': scale},
+                {'bbox_anchor': 1, 'bbox_ref': 1, 'skipped': 1, 'empty_slice': 1}
+            ) or {}
+            if not progress_doc.get('skipped') and not progress_doc.get('empty_slice'):
+                if bbox_anchor is None:
+                    bbox_anchor = progress_doc.get('bbox_anchor') or progress_doc.get('bbox_ref')
+                if bbox_ref is None:
+                    bbox_ref = progress_doc.get('bbox_ref') or progress_doc.get('bbox_anchor')
                 
     if len(flows) == (dataset.domain.exclusive_max[0] - start):
         # Everything appears to have been processed, early exit
