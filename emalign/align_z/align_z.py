@@ -331,8 +331,8 @@ def _compute_flow(dataset,
 
         # Transform mov to match ref
         if transformations is None:
-            if z == anchor_z:
-                # This is the first slice, use the anchor bbox
+            if z == anchor_z or bbox_anchor is None:
+                # This is the first usable slice, use the anchor bbox
                 overlap_ref, overlap_ref_mask, bbox_anchor = get_overlap_ref(ref, 
                                                                             mov, 
                                                                             ref_mask=ref_mask, 
@@ -363,7 +363,7 @@ def _compute_flow(dataset,
             # This gets added at the end of the array
             output_shape = np.array(output_shape) + patch_size
         else:
-            if z == anchor_z:
+            if z == anchor_z or bbox_anchor is None:
                 overlap_ref, overlap_ref_mask, bbox_anchor = get_overlap_ref(ref, 
                                                                         mov, 
                                                                         ref_mask=ref_mask, 
@@ -477,6 +477,13 @@ def compute_flow_dataset(dataset,
                                                             db=db,
                                                             z_offset=z_offset)
     assert not np.isnan(flow).all()
+
+    if bbox_anchor is None:
+        bbox_anchor = bbox_ref
+    if bbox_ref is None:
+        bbox_ref = bbox_anchor
+    if bbox_ref is None or bbox_anchor is None:
+        raise RuntimeError(f'{dataset_name}: Could not determine flow bounding boxes')
 
     ds_transform = transform*np.array([[1,1,scale,scale], [1,1,scale,scale]])
     ds_bbox_ref = (np.array(bbox_ref) * scale).astype(int).tolist()
