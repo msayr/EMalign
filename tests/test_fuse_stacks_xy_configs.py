@@ -68,24 +68,54 @@ def test_is_fuse_config_rejects_diagnostics_json():
 def test_parse_slice_retry_selection_accepts_single_slice():
     module = _module()
 
-    assert module.parse_slice_retry_selection('42') == (42, 42)
+    assert module.parse_slice_retry_selection('42') == {
+        'substack_index': None,
+        'start': 42,
+        'end': 42,
+    }
 
 
 def test_parse_slice_retry_selection_accepts_colon_range():
     module = _module()
 
-    assert module.parse_slice_retry_selection('42:47') == (42, 47)
+    assert module.parse_slice_retry_selection('42:47') == {
+        'substack_index': None,
+        'start': 42,
+        'end': 47,
+    }
 
 
 def test_parse_slice_retry_selection_accepts_dash_range():
     module = _module()
 
-    assert module.parse_slice_retry_selection('42-47') == (42, 47)
+    assert module.parse_slice_retry_selection('42-47') == {
+        'substack_index': None,
+        'start': 42,
+        'end': 47,
+    }
+
+
+def test_parse_slice_retry_selection_accepts_substack_slice():
+    module = _module()
+
+    assert module.parse_slice_retry_selection('01/42') == {
+        'substack_index': 1,
+        'start': 42,
+        'end': 42,
+    }
 
 
 def test_slice_is_selected_filters_slice_range():
     module = _module()
+    selection = module.parse_slice_retry_selection('42:47')
 
-    assert module.slice_is_selected(43, 8643, (42, 47))
-    assert module.slice_is_selected(2, 8643, (8642, 8647))
-    assert not module.slice_is_selected(48, 8648, (42, 47))
+    assert module.slice_is_selected(43, selection, substack_index=1)
+    assert not module.slice_is_selected(48, selection, substack_index=1)
+
+
+def test_slice_is_selected_filters_substack():
+    module = _module()
+    selection = module.parse_slice_retry_selection('01/42')
+
+    assert module.slice_is_selected(42, selection, substack_index=1)
+    assert not module.slice_is_selected(42, selection, substack_index=2)
