@@ -92,11 +92,12 @@ def is_fuse_config(config):
 
 
 def parse_slice_retry_selection(value):
-    """Parse a single global slice or inclusive global slice range.
+    """Parse a single slice or inclusive slice range.
 
     Accepted formats are ``N``, ``START:END``, or ``START-END``. The returned
-    tuple is inclusive and uses global Z indices, matching the indices shown in
-    fuse progress metadata.
+    tuple is inclusive. Matching is applied against both local fused-stack slice
+    indices and global Z indices so users can retry the slice numbers they see
+    in image viewers without having to know each fusion group's global offset.
     """
     if value is None:
         return None
@@ -121,7 +122,7 @@ def parse_slice_retry_selection(value):
             start, end = (int(part) for part in parts)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            'expected a global slice index or inclusive range, e.g. 42, 42:47, or 42-47'
+            'expected a slice index or inclusive range, e.g. 42, 42:47, or 42-47'
         ) from exc
 
     if start < 0 or end < 0:
@@ -131,12 +132,12 @@ def parse_slice_retry_selection(value):
     return start, end
 
 
-def slice_is_selected(global_slice_index, retry_slice_selection):
-    """Return True if a global slice index is inside an optional retry selection."""
+def slice_is_selected(local_slice_index, global_slice_index, retry_slice_selection):
+    """Return True if local or global slice indices match an optional retry selection."""
     if retry_slice_selection is None:
         return True
     start, end = retry_slice_selection
-    return start <= global_slice_index <= end
+    return start <= local_slice_index <= end or start <= global_slice_index <= end
 
 
 def get_fused_configs(
@@ -219,8 +220,8 @@ def fuse_stacks_group(config,
         wipe_progress_flag (bool): Whether to wipe progress for the stack. Defaults to False.
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records.
             If False, any slice with an existing progress record is skipped. Defaults to True.
-        retry_slice_selection (tuple[int, int] or None): Inclusive global slice range to re-fuse,
-            bypassing existing progress records for matching slices. Defaults to None.
+        retry_slice_selection (tuple[int, int] or None): Inclusive slice range to re-fuse,
+            matched against local fused-stack and global Z indices. Defaults to None.
         num_workers (int, optional): Number of threads used to render the final image by `sofima.warp.ndimage_warp`. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the
             larger input image. Set to None to disable. Defaults to 1.5.
@@ -321,8 +322,8 @@ def fuse_stacks_group(config,
     pbarz = tqdm(range(z_shape), position=1)
     for z in pbarz:
         global_slice_index = z + config['zmin']
-        if not slice_is_selected(global_slice_index, retry_slice_selection):
-            pbarz.set_description(f'Skipping unselected {global_slice_index}...')
+        if not slice_is_selected(z, global_slice_index, retry_slice_selection):
+            pbarz.set_description(f'Skipping unselected local {z} / global {global_slice_index}...')
             continue
         force_retry_slice = retry_slice_selection is not None
         if not overwrite and not force_retry_slice:
@@ -464,8 +465,8 @@ def align_fused_stacks_xy(config_path,
         overwrite (bool, optional): _description_. Defaults to False.
         wipe_progress_stack (str, optional): Name of the stack to wipe progress for. Defaults to None.
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records. Defaults to True.
-        retry_slice_selection (tuple[int, int] or None): Inclusive global slice range to re-fuse.
-            Matching slices are processed even if they have completed progress records. Defaults to None.
+        retry_slice_selection (tuple[int, int] or None): Inclusive slice range to re-fuse.
+            Matching local or global slices are processed even if they have completed progress records. Defaults to None.
         num_workers (int, optional): _description_. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the larger input image.
     '''
@@ -546,7 +547,7 @@ if __name__ == '__main__':
                         dest='retry_slice_selection',
                         type=parse_slice_retry_selection,
                         default=None,
-                        help='Re-fuse one global slice or inclusive global slice range even if progress is completed. Examples: 42, 42:47, 42-47.')
+                        help='Re-fuse one slice or inclusive slice range even if progress is completed. Matches local fused-stack indices and global Z indices. Examples: 42, 42:47, 42-47.')
     parser.add_argument('--scale',
                         dest='scale',
                         type=float,

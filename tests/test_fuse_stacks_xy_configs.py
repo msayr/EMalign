@@ -83,8 +83,9 @@ def test_parse_slice_retry_selection_accepts_dash_range():
     assert module.parse_slice_retry_selection('42-47') == (42, 47)
 
 
-def test_slice_is_selected_filters_global_slice_range():
+def test_slice_is_selected_filters_slice_range():
     module = _module()
 
-    assert module.slice_is_selected(43, (42, 47))
-    assert not module.slice_is_selected(48, (42, 47))
+    assert module.slice_is_selected(43, 8643, (42, 47))
+    assert module.slice_is_selected(2, 8643, (8642, 8647))
+    assert not module.slice_is_selected(48, 8648, (42, 47))
