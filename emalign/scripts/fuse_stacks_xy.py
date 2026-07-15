@@ -91,20 +91,11 @@ def is_fuse_config(config):
     return isinstance(config, dict) and required_fields.issubset(config)
 
 
-def parse_slice_retry_selection(value):
-    """Parse a local slice retry selection.
-
-    Accepted formats are ``N``, ``START:END``, or ``START-END`` to retry local
-    slice indices in every fused substack. Prefix the selection with a 1-based
-    fused substack number and ``/`` to target one substack, for example
-    ``01/22`` or ``01/20:25``.
-    """
-    if value is None:
-        return None
-
+def _parse_single_slice_retry_selection(value):
+    """Parse one local slice retry selection item."""
     value = value.strip()
     if not value:
-        raise argparse.ArgumentTypeError('slice retry selection cannot be empty')
+        raise argparse.ArgumentTypeError('slice retry selection cannot contain empty items')
 
     substack_index = None
     if '/' in value:
@@ -136,7 +127,7 @@ def parse_slice_retry_selection(value):
             start, end = (int(part) for part in parts)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            'expected a local slice index or inclusive range, e.g. 42, 42:47, 42-47, or 01/42'
+            'expected a local slice index or inclusive range, e.g. 42, 42:47, 42-47, 01/42, or 01/42,01/47'
         ) from exc
 
     if start < 0 or end < 0:
@@ -150,14 +141,36 @@ def parse_slice_retry_selection(value):
     }
 
 
+def parse_slice_retry_selection(value):
+    """Parse one or more local slice retry selections.
+
+    Accepted formats are ``N``, ``START:END``, or ``START-END`` to retry local
+    slice indices in every fused substack. Prefix a selection with a 1-based
+    fused substack number and ``/`` to target one substack, for example
+    ``01/22`` or ``01/20:25``. Use commas for non-adjacent selections, such as
+    ``01/22,01/171,01/180,01/189``.
+    """
+    if value is None:
+        return None
+
+    value = value.strip()
+    if not value:
+        raise argparse.ArgumentTypeError('slice retry selection cannot be empty')
+
+    return [_parse_single_slice_retry_selection(item) for item in value.split(',')]
+
+
 def slice_is_selected(local_slice_index, retry_slice_selection, substack_index=None):
-    """Return True if a local slice index matches an optional retry selection."""
+    """Return True if a local slice index matches any optional retry selection."""
     if retry_slice_selection is None:
         return True
-    selected_substack = retry_slice_selection['substack_index']
-    if selected_substack is not None and selected_substack != substack_index:
-        return False
-    return retry_slice_selection['start'] <= local_slice_index <= retry_slice_selection['end']
+    for selection in retry_slice_selection:
+        selected_substack = selection['substack_index']
+        if selected_substack is not None and selected_substack != substack_index:
+            continue
+        if selection['start'] <= local_slice_index <= selection['end']:
+            return True
+    return False
 
 
 def get_fused_configs(
@@ -241,7 +254,7 @@ def fuse_stacks_group(config,
         wipe_progress_flag (bool): Whether to wipe progress for the stack. Defaults to False.
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records.
             If False, any slice with an existing progress record is skipped. Defaults to True.
-        retry_slice_selection (dict or None): Local slice range to re-fuse, optionally
+        retry_slice_selection (list[dict] or None): Local slice ranges to re-fuse, optionally
             scoped to a 1-based fused substack index. Defaults to None.
         substack_index (int or None): 1-based fused substack number for matching retry selections.
         num_workers (int, optional): Number of threads used to render the final image by `sofima.warp.ndimage_warp`. Defaults to 1.
@@ -487,7 +500,7 @@ def align_fused_stacks_xy(config_path,
         overwrite (bool, optional): _description_. Defaults to False.
         wipe_progress_stack (str, optional): Name of the stack to wipe progress for. Defaults to None.
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records. Defaults to True.
-        retry_slice_selection (dict or None): Local slice range to re-fuse.
+        retry_slice_selection (list[dict] or None): Local slice ranges to re-fuse.
             Matching local slices are processed even if they have completed progress records. Defaults to None.
         num_workers (int, optional): _description_. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the larger input image.
@@ -570,7 +583,7 @@ if __name__ == '__main__':
                         dest='retry_slice_selection',
                         type=parse_slice_retry_selection,
                         default=None,
-                        help='Re-fuse one local slice or inclusive local slice range even if progress is completed. Prefix with a 1-based fused substack number and / to target one substack. Examples: 22, 20:25, 01/22, 01/20:25.')
+                        help='Re-fuse one or more local slices/ranges even if progress is completed. Prefix with a 1-based fused substack number and / to target one substack; separate non-adjacent selections with commas. Examples: 22, 20:25, 01/22, 01/20:25, 01/22,01/171,01/180.')
     parser.add_argument('--scale',
                         dest='scale',
                         type=float,
