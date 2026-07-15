@@ -91,6 +91,54 @@ def is_fuse_config(config):
     return isinstance(config, dict) and required_fields.issubset(config)
 
 
+def parse_slice_retry_selection(value):
+    """Parse a single global slice or inclusive global slice range.
+
+    Accepted formats are ``N``, ``START:END``, or ``START-END``. The returned
+    tuple is inclusive and uses global Z indices, matching the indices shown in
+    fuse progress metadata.
+    """
+    if value is None:
+        return None
+
+    value = value.strip()
+    if not value:
+        raise argparse.ArgumentTypeError('slice retry selection cannot be empty')
+
+    separator = None
+    if ':' in value:
+        separator = ':'
+    elif '-' in value[1:]:
+        separator = '-'
+
+    try:
+        if separator is None:
+            start = end = int(value)
+        else:
+            parts = value.split(separator)
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                raise ValueError
+            start, end = (int(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            'expected a global slice index or inclusive range, e.g. 42, 42:47, or 42-47'
+        ) from exc
+
+    if start < 0 or end < 0:
+        raise argparse.ArgumentTypeError('slice indices must be non-negative')
+    if start > end:
+        raise argparse.ArgumentTypeError('slice retry range start must be <= end')
+    return start, end
+
+
+def slice_is_selected(global_slice_index, retry_slice_selection):
+    """Return True if a global slice index is inside an optional retry selection."""
+    if retry_slice_selection is None:
+        return True
+    start, end = retry_slice_selection
+    return start <= global_slice_index <= end
+
+
 def get_fused_configs(
         main_config_path,
         scale=0.1
@@ -150,6 +198,7 @@ def fuse_stacks_group(config,
                       overwrite=False,
                       wipe_progress_flag=False,
                       retry_missing_slices=True,
+                      retry_slice_selection=None,
                       num_workers=1,
                       max_canvas_scale=1.5):
     '''Fuse a group of stacks that overlap on the XY plane.
@@ -170,6 +219,8 @@ def fuse_stacks_group(config,
         wipe_progress_flag (bool): Whether to wipe progress for the stack. Defaults to False.
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records.
             If False, any slice with an existing progress record is skipped. Defaults to True.
+        retry_slice_selection (tuple[int, int] or None): Inclusive global slice range to re-fuse,
+            bypassing existing progress records for matching slices. Defaults to None.
         num_workers (int, optional): Number of threads used to render the final image by `sofima.warp.ndimage_warp`. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the
             larger input image. Set to None to disable. Defaults to 1.5.
@@ -270,7 +321,11 @@ def fuse_stacks_group(config,
     pbarz = tqdm(range(z_shape), position=1)
     for z in pbarz:
         global_slice_index = z + config['zmin']
-        if not overwrite:
+        if not slice_is_selected(global_slice_index, retry_slice_selection):
+            pbarz.set_description(f'Skipping unselected {global_slice_index}...')
+            continue
+        force_retry_slice = retry_slice_selection is not None
+        if not overwrite and not force_retry_slice:
             if has_completed_fuse_progress(db, destination_name, step_name, z):
                 pbarz.set_description(f'Skipping completed {z}...')
                 continue
@@ -395,6 +450,7 @@ def align_fused_stacks_xy(config_path,
                           overwrite=False,
                           wipe_progress_stack=None,
                           retry_missing_slices=True,
+                          retry_slice_selection=None,
                           num_workers=1,
                           max_canvas_scale=1.5):
     '''Align groups of overlapping stacks one after the other.
@@ -408,6 +464,8 @@ def align_fused_stacks_xy(config_path,
         overwrite (bool, optional): _description_. Defaults to False.
         wipe_progress_stack (str, optional): Name of the stack to wipe progress for. Defaults to None.
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records. Defaults to True.
+        retry_slice_selection (tuple[int, int] or None): Inclusive global slice range to re-fuse.
+            Matching slices are processed even if they have completed progress records. Defaults to None.
         num_workers (int, optional): _description_. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the larger input image.
     '''
@@ -423,7 +481,7 @@ def align_fused_stacks_xy(config_path,
 
 
     fused_configs = get_fused_configs(config_path,
-                                      0.1)
+                                      scale)
     
     # Function to determine image quality to choose which one is on top
     # Highest value == on top
@@ -449,6 +507,7 @@ def align_fused_stacks_xy(config_path,
                           overwrite=overwrite,
                           wipe_progress_flag=wipe_this_stack,
                           retry_missing_slices=retry_missing_slices,
+                          retry_slice_selection=retry_slice_selection,
                           num_workers=num_workers,
                           max_canvas_scale=max_canvas_scale)
     logging.info(f'All {len(fused_configs)} stacks were fused!')
@@ -483,6 +542,31 @@ if __name__ == '__main__':
                         action='store_false',
                         help='Skip slices with any existing progress record, including incomplete slices. Default: retry incomplete slices.')
     parser.set_defaults(retry_missing_slices=True)
+    parser.add_argument('--retry-slices',
+                        dest='retry_slice_selection',
+                        type=parse_slice_retry_selection,
+                        default=None,
+                        help='Re-fuse one global slice or inclusive global slice range even if progress is completed. Examples: 42, 42:47, 42-47.')
+    parser.add_argument('--scale',
+                        dest='scale',
+                        type=float,
+                        default=0.1,
+                        help='Scale used to downsample images when determining XY offsets. Default: 0.1')
+    parser.add_argument('--patch-size',
+                        dest='patch_size',
+                        type=int,
+                        default=160,
+                        help='Patch size used to compute the flow map. Default: 160')
+    parser.add_argument('--stride',
+                        dest='stride',
+                        type=int,
+                        default=40,
+                        help='Stride used to compute the flow map. Default: 40')
+    parser.add_argument('--img-on-top',
+                        dest='img_on_top',
+                        choices=['auto', '1', '2'],
+                        default='auto',
+                        help='Which image should be on top when stitching: auto, 1, or 2. Default: auto')
     parser.add_argument('--max-canvas-scale',
                         dest='max_canvas_scale',
                         type=float,
@@ -492,8 +576,13 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     align_fused_stacks_xy(config_path=args.config_path,
+                          scale=args.scale,
+                          patch_size=args.patch_size,
+                          stride=args.stride,
+                          img_on_top=args.img_on_top,
                           num_workers=args.num_workers,
                           overwrite=args.overwrite,
                           wipe_progress_stack=args.wipe_progress_stack,
                           retry_missing_slices=args.retry_missing_slices,
+                          retry_slice_selection=args.retry_slice_selection,
                           max_canvas_scale=args.max_canvas_scale)

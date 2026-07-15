@@ -1,6 +1,11 @@
 import importlib
 import sys
 import types
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def _install_import_stubs():
@@ -58,3 +63,28 @@ def test_is_fuse_config_rejects_diagnostics_json():
         'fallback_group_count': 1,
         'groups': [],
     })
+
+
+def test_parse_slice_retry_selection_accepts_single_slice():
+    module = _module()
+
+    assert module.parse_slice_retry_selection('42') == (42, 42)
+
+
+def test_parse_slice_retry_selection_accepts_colon_range():
+    module = _module()
+
+    assert module.parse_slice_retry_selection('42:47') == (42, 47)
+
+
+def test_parse_slice_retry_selection_accepts_dash_range():
+    module = _module()
+
+    assert module.parse_slice_retry_selection('42-47') == (42, 47)
+
+
+def test_slice_is_selected_filters_global_slice_range():
+    module = _module()
+
+    assert module.slice_is_selected(43, (42, 47))
+    assert not module.slice_is_selected(48, (42, 47))
