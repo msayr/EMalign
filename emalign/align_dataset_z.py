@@ -203,6 +203,103 @@ def initialize_destination_stores(destination_path, align_plan, save_downsampled
     return destination, destination_mask, ds_destination, ds_project_output_path
 
 
+
+def _dataset_global_bounds(config):
+    """Return the inclusive/exclusive global Z bounds covered by a dataset config."""
+    local_z_min = config.get('local_z_min') or 0
+    local_z_max = config.get('local_z_max')
+
+    if local_z_max is None:
+        import tensorstore as ts
+        dataset = open_store(os.path.abspath(config['dataset_path']), mode='r', dtype=ts.uint8)
+        local_z_max = dataset.shape[0]
+
+    z_offset = int(config['z_offset'])
+    return z_offset, z_offset + int(local_z_max) - int(local_z_min)
+
+
+def _zero_store_from_slice(dataset, start_slice, label):
+    """Overwrite all slices from start_slice onward with zeros."""
+    z_min = int(dataset.domain.inclusive_min[0])
+    z_max = int(dataset.domain.exclusive_max[0])
+    start = max(int(start_slice), z_min)
+    if start >= z_max:
+        logging.info(f'{label}: no slices to clear at or after {start_slice}')
+        return
+
+    slice_shape = tuple(dataset.shape[1:])
+    zero_slice = np.zeros(slice_shape, dtype=dataset.dtype.numpy_dtype)
+    for z in range(start, z_max):
+        dataset[z].write(zero_slice).result()
+    logging.info(f'{label}: cleared slices [{start}, {z_max})')
+
+
+def _prepare_partial_restart(dataset_configs, project_name, restart_from_slice):
+    """Clear Z progress so alignment can resume at restart_from_slice."""
+    if restart_from_slice is None:
+        return []
+
+    restart_from_slice = int(restart_from_slice)
+    if restart_from_slice < 0:
+        raise ValueError('--restart-from-slice must be non-negative')
+
+    logging.info(f'Preparing partial Z restart from global slice {restart_from_slice}')
+    first_config = next(iter(dataset_configs.values()))
+    mongodb_config_filepath = first_config.get('mongodb_config_filepath')
+    client = get_mongo_client(mongodb_config_filepath)
+    db = get_mongo_db(client, project_name)
+
+    affected_stacks = []
+    for dataset_name, config in dataset_configs.items():
+        global_start, global_end = _dataset_global_bounds(config)
+        if global_end <= restart_from_slice:
+            continue
+
+        affected_stacks.append(dataset_name)
+        local_z_min = config.get('local_z_min') or 0
+        local_restart = int(local_z_min) + max(0, restart_from_slice - global_start)
+
+        collection = db[dataset_name]
+        collection.delete_many({
+            'step_name': {'$in': ['flow_z', 'render_z']},
+            '$or': [
+                {'global_slice': {'$gte': restart_from_slice}},
+                {'local_slice': {'$gte': local_restart}},
+            ],
+        })
+        collection.delete_many({'step_name': 'mesh_relax_z'})
+
+        attrs = get_store_attributes(config['dataset_path'])
+        attrs['z_aligned'] = False
+        set_store_attributes(config['dataset_path'], attrs)
+        logging.info(
+            f'{dataset_name}: reset progress from local slice {local_restart} '
+            f'(global range [{global_start}, {global_end}))'
+        )
+
+    return affected_stacks
+
+
+def _apply_skip_slices(dataset_configs, skip_slices):
+    """Add globally specified skip slices to each dataset config as local flow skips."""
+    if not skip_slices:
+        return
+
+    skip_slices = sorted({int(z) for z in skip_slices})
+    for dataset_name, config in dataset_configs.items():
+        global_start, global_end = _dataset_global_bounds(config)
+        local_z_min = config.get('local_z_min') or 0
+        existing = set(config.get('ignore_slices_flow', []))
+        added = []
+        for global_z in skip_slices:
+            if global_start <= global_z < global_end:
+                local_z = int(local_z_min) + global_z - global_start
+                existing.add(local_z)
+                added.append(local_z)
+        config['ignore_slices_flow'] = sorted(existing)
+        if added:
+            logging.info(f'{dataset_name}: skipping local slices {added} for global skip slices')
+
 def execute_alignment(paths, dataset_configs, root_stack, num_workers, wipe_progress_stacks):
     '''Execute the alignment for all datasets.
 
@@ -247,7 +344,9 @@ def align_dataset_z(project_dir: str,
                     num_workers: int = NUM_WORKERS,
                     save_downsampled: float = DOWNSAMPLE_SCALE,
                     start_over: bool = False,
-                    wipe_progress_stacks: Optional[list[str]] = None) -> None:
+                    wipe_progress_stacks: Optional[list[str]] = None,
+                    restart_from_slice: Optional[int] = None,
+                    skip_slices: Optional[list[int]] = None) -> None:
     '''Execute Z alignment using pre-generated configuration files.
 
     Args:
@@ -256,6 +355,8 @@ def align_dataset_z(project_dir: str,
         save_downsampled: Downsampling factor for inspection store
         start_over: Wipe all progress and restart
         wipe_progress_stacks: List of specific stacks to wipe progress for
+        restart_from_slice: Global slice at which to clear outputs and resume
+        skip_slices: Global slices to skip during Z flow computation
     '''
     config_dir = os.path.join(project_dir, 'config/z_config')
     if not os.path.exists(config_dir) or not os.listdir(config_dir):
@@ -276,6 +377,11 @@ def align_dataset_z(project_dir: str,
     logging.info(f'Root stack: {root_stack}')
     logging.info(f'Number of alignment paths: {len(paths)}')
     logging.info(f'Destination: {destination_path}')
+
+    if wipe_progress_stacks is None:
+        wipe_progress_stacks = []
+
+    _apply_skip_slices(dataset_configs, skip_slices)
 
     # Handle start_over
     if start_over:
@@ -302,11 +408,19 @@ def align_dataset_z(project_dir: str,
             set_store_attributes(dataset_configs[dataset_name]['dataset_path'], attrs)
             logging.info(f'Wiped progress for {dataset_name}')
 
+    _prepare_partial_restart(dataset_configs, project_name, restart_from_slice)
+
     # Initialize destination stores
     destination, destination_mask, ds_destination, ds_project_output_path = \
         initialize_destination_stores(
             destination_path, align_plan, save_downsampled, project_name, start_over
         )
+
+    if restart_from_slice is not None and not start_over:
+        _zero_store_from_slice(destination, restart_from_slice, destination_path)
+        _zero_store_from_slice(destination_mask, restart_from_slice, destination_path + '_mask')
+        if ds_destination is not None:
+            _zero_store_from_slice(ds_destination, restart_from_slice, ds_project_output_path)
 
     # Execute alignment
     logging.info('Starting Z alignment...')
@@ -356,8 +470,19 @@ if __name__ == '__main__':
                         dest='wipe_progress_stacks',
                         type=str,
                         nargs='+',
-                        default=[''],
+                        default=[],
                         help='Wipe progress for one or more specific stack(s) before starting')
+    parser.add_argument('--restart-from-slice',
+                        dest='restart_from_slice',
+                        type=int,
+                        default=None,
+                        help='Clear existing Z outputs and progress at this global slice and later, then resume alignment from there.')
+    parser.add_argument('--skip-slices',
+                        dest='skip_slices',
+                        type=int,
+                        nargs='+',
+                        default=[],
+                        help='Global slice numbers to skip during Z flow computation.')
 
     args = parser.parse_args()
 
@@ -375,5 +500,7 @@ if __name__ == '__main__':
         num_workers=args.num_workers,
         save_downsampled=args.save_downsampled,
         start_over=args.start_over,
-        wipe_progress_stacks=args.wipe_progress_stacks
+        wipe_progress_stacks=args.wipe_progress_stacks,
+        restart_from_slice=args.restart_from_slice,
+        skip_slices=args.skip_slices
     )

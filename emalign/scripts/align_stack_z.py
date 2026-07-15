@@ -369,9 +369,16 @@ def align_stack_z(destination_path,
             skipped += 1 # Assume skipped slices are logged correctly
             continue
 
+        global_z = z + z_offset - dataset.domain.inclusive_min[0]
+        if z in ignore_slices_flow or global_z in ignore_slices_flow:
+            # Slices ignored during flow contain invalid mesh entries and must not be rendered.
+            skipped += 1
+            metadata = {'empty_slice': False, 'skipped': True, 'skip_reason': 'ignore_slices_flow'}
+            log_progress(db, dataset_name, step_name, global_z, z, metadata)
+            continue
+
         # Load data
         data = dataset[z].read().result()
-        global_z = z + z_offset - dataset.domain.inclusive_min[0]
 
         if not data.any():
             # If empty slice, skip and go to next z
@@ -421,6 +428,13 @@ def align_stack_z(destination_path,
         # Mask gets full of holes because of warping
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(3,3))
         aligned_mask = cv2.morphologyEx(aligned_mask.astype(np.uint8),cv2.MORPH_CLOSE,kernel).astype(bool)
+
+        if not aligned_mask.any():
+            skipped += 1
+            metadata = {'empty_slice': False, 'skipped': True, 'skip_reason': 'empty_aligned_mask'}
+            logging.warning(f'{dataset_name}: skipping slice {z} (global {global_z}) because the aligned mask is empty')
+            log_progress(db, dataset_name, step_name, global_z, z, metadata)
+            continue
 
         if overwrite:
             # There may be data written to this slice so let's make sure it is overwritten

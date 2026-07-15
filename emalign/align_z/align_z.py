@@ -200,14 +200,15 @@ def _compute_flow(dataset,
             flows.append(dataset_flow[z].read().result())
             transform[z] = dataset_trsf[z].read().result() if transformations is None else transformations[z]
 
-            if z == anchor_z and bbox_anchor is None:
-                # Get bbox from previous slices (should be passed but take it for return)
-                bbox_anchor = db[dataset_name].find_one({'step_name': step_name, 'local_slice': z, 'scale': scale}, 
-                                                        {'bbox_anchor': 1})['bbox_anchor']
-            elif z > anchor_z and bbox_ref is None:
-                # Get bbox from previous slices
-                bbox_ref = db[dataset_name].find_one({'step_name': step_name, 'local_slice': z, 'scale': scale}, 
-                                                     {'bbox_ref': 1})['bbox_ref']
+            progress_doc = db[dataset_name].find_one(
+                {'step_name': step_name, 'local_slice': z, 'scale': scale},
+                {'bbox_anchor': 1, 'bbox_ref': 1, 'skipped': 1, 'empty_slice': 1}
+            ) or {}
+            if not progress_doc.get('skipped') and not progress_doc.get('empty_slice'):
+                if bbox_anchor is None:
+                    bbox_anchor = progress_doc.get('bbox_anchor') or progress_doc.get('bbox_ref')
+                if bbox_ref is None:
+                    bbox_ref = progress_doc.get('bbox_ref') or progress_doc.get('bbox_anchor')
                 
     if len(flows) == (dataset.domain.exclusive_max[0] - start):
         # Everything appears to have been processed, early exit
@@ -261,12 +262,21 @@ def _compute_flow(dataset,
     mfc = flow_field.JAXMaskedXCorrWithStatsCalculator()
 
     pbar = tqdm(range(start, dataset.domain.exclusive_max[0]), position=0, dynamic_ncols=True)
+
+    def append_invalid_flow(z):
+        if flows:
+            invalid_flow = np.ones_like(flows[-1]) * np.nan
+        else:
+            invalid_flow = np.full((4, 1, 1), np.nan, dtype=np.float32)
+        flows.append(invalid_flow)
+        return write_ndarray(dataset_flow, invalid_flow, z, resolve=True)[0]
+
     for z in pbar:
         if z in ignore_slices:
             pbar.set_description(f'{dataset_name}: Ignoring slice...')
             # Slice is to be ignored for flow computation based on user input.
             # These should not be used for mesh relaxation or they will bias the result, so we set them as invalid.
-            flows.append(np.ones_like(flows[-1]) * np.nan)
+            dataset_flow = append_invalid_flow(z)
             
             metadata = {
                 'ref_dataset': ref_dataset_name,
@@ -285,8 +295,8 @@ def _compute_flow(dataset,
 
         # If empty slice, skip and compare to next one
         if not mov.any():
-            # We should be starting with a non-empty slice, so by the time we hit this, flow should exist
-            flows.append(np.ones_like(flows[-1]) * np.nan)
+            # Empty slices have invalid flow and should not bias mesh relaxation.
+            dataset_flow = append_invalid_flow(z)
             metadata = {
                 'ref_dataset': ref_dataset_name,
                 'scale': scale,
@@ -322,8 +332,8 @@ def _compute_flow(dataset,
 
         # Transform mov to match ref
         if transformations is None:
-            if z == anchor_z:
-                # This is the first slice, use the anchor bbox
+            if z == anchor_z or bbox_anchor is None:
+                # This is the first usable slice, use the anchor bbox
                 overlap_ref, overlap_ref_mask, bbox_anchor = get_overlap_ref(ref, 
                                                                             mov, 
                                                                             ref_mask=ref_mask, 
@@ -354,7 +364,7 @@ def _compute_flow(dataset,
             # This gets added at the end of the array
             output_shape = np.array(output_shape) + patch_size
         else:
-            if z == anchor_z:
+            if z == anchor_z or bbox_anchor is None:
                 overlap_ref, overlap_ref_mask, bbox_anchor = get_overlap_ref(ref, 
                                                                         mov, 
                                                                         ref_mask=ref_mask, 
@@ -468,6 +478,13 @@ def compute_flow_dataset(dataset,
                                                             db=db,
                                                             z_offset=z_offset)
     assert not np.isnan(flow).all()
+
+    if bbox_anchor is None:
+        bbox_anchor = bbox_ref
+    if bbox_ref is None:
+        bbox_ref = bbox_anchor
+    if bbox_ref is None or bbox_anchor is None:
+        raise RuntimeError(f'{dataset_name}: Could not determine flow bounding boxes')
 
     ds_transform = transform*np.array([[1,1,scale,scale], [1,1,scale,scale]])
     ds_bbox_ref = (np.array(bbox_ref) * scale).astype(int).tolist()
