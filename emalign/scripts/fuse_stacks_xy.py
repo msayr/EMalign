@@ -31,12 +31,30 @@ def configure_thread_env(num_workers):
         os.environ.setdefault(name, value)
 
 
+def _extract_cores_arg(argv):
+    """Return an exact ``-c``/``--cores`` value without misreading ``-cfg``."""
+    if argv is None:
+        argv = os.sys.argv[1:]
+
+    for i, arg in enumerate(argv):
+        if arg == '-c' or arg == '--cores':
+            if i + 1 < len(argv):
+                return argv[i + 1]
+            return None
+        if arg.startswith('--cores='):
+            return arg.split('=', 1)[1]
+    return None
+
+
 def _preconfigure_thread_env_from_cli(argv=None):
-    """Apply ``--cores``/``-c`` limits early enough for imported native libraries."""
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument('-c', '--cores', dest='num_workers', type=int)
-    args, _ = parser.parse_known_args(argv)
-    configure_thread_env(args.num_workers)
+    """Apply exact ``--cores``/``-c`` limits early enough for imported native libraries."""
+    cores = _extract_cores_arg(argv)
+    if cores is None:
+        return
+    try:
+        configure_thread_env(int(cores))
+    except ValueError:
+        return
 
 
 _preconfigure_thread_env_from_cli()

@@ -131,3 +131,19 @@ def test_thread_env_uses_core_count_without_overriding_existing_env(monkeypatch)
     module.configure_thread_env(1)
 
     assert os.environ['OMP_NUM_THREADS'] == '8'
+
+
+def test_early_core_parser_does_not_treat_config_flag_as_cores():
+    module = _module()
+
+    assert module._extract_cores_arg([
+        '-cfg', '/tmp/main_config.json',
+        '-c', '2',
+    ]) == '2'
+    assert module._extract_cores_arg([
+        '-cfg', '/tmp/main_config.json',
+        '--cores=3',
+    ]) == '3'
+    assert module._extract_cores_arg([
+        '-cfg', '/tmp/main_config.json',
+    ]) is None
