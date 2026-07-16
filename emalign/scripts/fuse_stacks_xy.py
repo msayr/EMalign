@@ -91,6 +91,115 @@ def is_fuse_config(config):
     return isinstance(config, dict) and required_fields.issubset(config)
 
 
+def _parse_single_slice_retry_selection(value):
+    """Parse one local slice retry selection item."""
+    value = value.strip()
+    if not value:
+        raise argparse.ArgumentTypeError('slice retry selection cannot contain empty items')
+
+    substack_index = None
+    if '/' in value:
+        substack_part, value = value.split('/', 1)
+        if not substack_part or not value:
+            raise argparse.ArgumentTypeError(
+                'expected SUBSTACK/SLICE, e.g. 01/22 or 01/20:25'
+            )
+        try:
+            substack_index = int(substack_part)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError('substack index must be an integer') from exc
+        if substack_index < 1:
+            raise argparse.ArgumentTypeError('substack index must be 1 or greater')
+
+    separator = None
+    if ':' in value:
+        separator = ':'
+    elif '-' in value[1:]:
+        separator = '-'
+
+    try:
+        if separator is None:
+            start = end = int(value)
+        else:
+            parts = value.split(separator)
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                raise ValueError
+            start, end = (int(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            'expected a local slice index or inclusive range, e.g. 42, 42:47, 42-47, 01/42, or 01/42,01/47'
+        ) from exc
+
+    if start < 0 or end < 0:
+        raise argparse.ArgumentTypeError('slice indices must be non-negative')
+    if start > end:
+        raise argparse.ArgumentTypeError('slice retry range start must be <= end')
+    return {
+        'substack_index': substack_index,
+        'start': start,
+        'end': end,
+    }
+
+
+def parse_slice_retry_selection(value):
+    """Parse one or more local slice retry selections.
+
+    Accepted formats are ``N``, ``START:END``, or ``START-END`` to retry local
+    slice indices in every fused substack. Prefix a selection with a 1-based
+    fused substack number and ``/`` to target one substack, for example
+    ``01/22`` or ``01/20:25``. Use commas for non-adjacent selections, such as
+    ``01/22,01/171,01/180,01/189``.
+    """
+    if value is None:
+        return None
+
+    value = value.strip()
+    if not value:
+        raise argparse.ArgumentTypeError('slice retry selection cannot be empty')
+
+    return [_parse_single_slice_retry_selection(item) for item in value.split(',')]
+
+
+def slice_is_selected(local_slice_index, retry_slice_selection, substack_index=None):
+    """Return True if a local slice index matches any optional retry selection."""
+    if retry_slice_selection is None:
+        return True
+    for selection in retry_slice_selection:
+        selected_substack = selection['substack_index']
+        if selected_substack is not None and selected_substack != substack_index:
+            continue
+        if selection['start'] <= local_slice_index <= selection['end']:
+            return True
+    return False
+
+
+def clear_destination_slice(destination, destination_mask, z):
+    """Clear one existing fused image and mask slice before rewriting it.
+
+    Targeted retries may produce a smaller canvas than the previous attempt. TensorStore
+    writes only cover the new canvas extent, so stale pixels outside that extent would
+    otherwise remain in the destination slice and make it look as though tiles were
+    duplicated or unrelated slices changed. Clearing only the selected z-plane keeps
+    retry writes isolated to the exact requested slice.
+    """
+    destination = destination.resolve().result()
+    destination_mask = destination_mask.resolve().result()
+
+    dest_shape = tuple(int(v) for v in destination.domain.exclusive_max)
+    mask_shape = tuple(int(v) for v in destination_mask.domain.exclusive_max)
+
+    if z >= dest_shape[0] or z >= mask_shape[0]:
+        return destination, destination_mask
+
+    destination[z:z + 1, :dest_shape[1], :dest_shape[2]].write(
+        0, can_reference_source_data_indefinitely=True
+    ).result()
+    destination_mask[z:z + 1, :mask_shape[1], :mask_shape[2]].write(
+        False, can_reference_source_data_indefinitely=True
+    ).result()
+    return destination, destination_mask
+
+
 def get_fused_configs(
         main_config_path,
         scale=0.1
@@ -109,7 +218,7 @@ def get_fused_configs(
     output_dir = os.path.dirname(os.path.abspath(main_config_path))
 
     # Check for existing files
-    config_filepaths = glob(os.path.join(output_dir, 'fuse_xy_*.json'))
+    config_filepaths = sorted(glob(os.path.join(output_dir, 'fuse_xy_*.json')))
 
     if len(config_filepaths) == 0:
         # Compute and write configuration files
@@ -150,6 +259,8 @@ def fuse_stacks_group(config,
                       overwrite=False,
                       wipe_progress_flag=False,
                       retry_missing_slices=True,
+                      retry_slice_selection=None,
+                      substack_index=None,
                       num_workers=1,
                       max_canvas_scale=1.5):
     '''Fuse a group of stacks that overlap on the XY plane.
@@ -170,6 +281,9 @@ def fuse_stacks_group(config,
         wipe_progress_flag (bool): Whether to wipe progress for the stack. Defaults to False.
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records.
             If False, any slice with an existing progress record is skipped. Defaults to True.
+        retry_slice_selection (list[dict] or None): Local slice ranges to re-fuse, optionally
+            scoped to a 1-based fused substack index. Defaults to None.
+        substack_index (int or None): 1-based fused substack number for matching retry selections.
         num_workers (int, optional): Number of threads used to render the final image by `sofima.warp.ndimage_warp`. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the
             larger input image. Set to None to disable. Defaults to 1.5.
@@ -270,7 +384,11 @@ def fuse_stacks_group(config,
     pbarz = tqdm(range(z_shape), position=1)
     for z in pbarz:
         global_slice_index = z + config['zmin']
-        if not overwrite:
+        if not slice_is_selected(z, retry_slice_selection, substack_index):
+            pbarz.set_description(f'Skipping unselected substack {substack_index} local slice {z}...')
+            continue
+        force_retry_slice = retry_slice_selection is not None
+        if not overwrite and not force_retry_slice:
             if has_completed_fuse_progress(db, destination_name, step_name, z):
                 pbarz.set_description(f'Skipping completed {z}...')
                 continue
@@ -351,6 +469,8 @@ def fuse_stacks_group(config,
 
         if canvas is not None:
             pbarz.set_description('Writing slice...')
+            if force_retry_slice and not overwrite:
+                destination, destination_mask = clear_destination_slice(destination, destination_mask, z)
             destination, _ = write_data(destination, canvas, z)
             destination_mask, _ = write_data(destination_mask, canvas_mask, z)
 
@@ -395,6 +515,7 @@ def align_fused_stacks_xy(config_path,
                           overwrite=False,
                           wipe_progress_stack=None,
                           retry_missing_slices=True,
+                          retry_slice_selection=None,
                           num_workers=1,
                           max_canvas_scale=1.5):
     '''Align groups of overlapping stacks one after the other.
@@ -408,6 +529,8 @@ def align_fused_stacks_xy(config_path,
         overwrite (bool, optional): _description_. Defaults to False.
         wipe_progress_stack (str, optional): Name of the stack to wipe progress for. Defaults to None.
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records. Defaults to True.
+        retry_slice_selection (list[dict] or None): Local slice ranges to re-fuse.
+            Matching local slices are processed even if they have completed progress records. Defaults to None.
         num_workers (int, optional): _description_. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the larger input image.
     '''
@@ -423,7 +546,7 @@ def align_fused_stacks_xy(config_path,
 
 
     fused_configs = get_fused_configs(config_path,
-                                      0.1)
+                                      scale)
     
     # Function to determine image quality to choose which one is on top
     # Highest value == on top
@@ -431,7 +554,7 @@ def align_fused_stacks_xy(config_path,
     img_q_fun = lambda img, m: compute_laplacian_var(img, m)*0.5 + compute_sobel_mean(img, m) + compute_grad_mag(img, m)*100
     
     pbar = tqdm(fused_configs, position=0, leave=True)
-    for config in pbar:
+    for substack_index, config in enumerate(pbar, start=1):
         pbar.set_description(f'z = {config['zmin']} - {config['zmax']}: Processing group of stacks...')
         destination_name = '_'.join([os.path.basename(os.path.abspath(ds)) for ds in config['dataset_paths']])
         destination_name += '_fused'
@@ -449,6 +572,8 @@ def align_fused_stacks_xy(config_path,
                           overwrite=overwrite,
                           wipe_progress_flag=wipe_this_stack,
                           retry_missing_slices=retry_missing_slices,
+                          retry_slice_selection=retry_slice_selection,
+                          substack_index=substack_index,
                           num_workers=num_workers,
                           max_canvas_scale=max_canvas_scale)
     logging.info(f'All {len(fused_configs)} stacks were fused!')
@@ -483,6 +608,31 @@ if __name__ == '__main__':
                         action='store_false',
                         help='Skip slices with any existing progress record, including incomplete slices. Default: retry incomplete slices.')
     parser.set_defaults(retry_missing_slices=True)
+    parser.add_argument('--retry-slices',
+                        dest='retry_slice_selection',
+                        type=parse_slice_retry_selection,
+                        default=None,
+                        help='Re-fuse one or more local slices/ranges even if progress is completed. Prefix with a 1-based fused substack number and / to target one substack; separate non-adjacent selections with commas. Examples: 22, 20:25, 01/22, 01/20:25, 01/22,01/171,01/180.')
+    parser.add_argument('--scale',
+                        dest='scale',
+                        type=float,
+                        default=0.1,
+                        help='Scale used to downsample images when determining XY offsets. Default: 0.1')
+    parser.add_argument('--patch-size',
+                        dest='patch_size',
+                        type=int,
+                        default=160,
+                        help='Patch size used to compute the flow map. Default: 160')
+    parser.add_argument('--stride',
+                        dest='stride',
+                        type=int,
+                        default=40,
+                        help='Stride used to compute the flow map. Default: 40')
+    parser.add_argument('--img-on-top',
+                        dest='img_on_top',
+                        choices=['auto', '1', '2'],
+                        default='auto',
+                        help='Which image should be on top when stitching: auto, 1, or 2. Default: auto')
     parser.add_argument('--max-canvas-scale',
                         dest='max_canvas_scale',
                         type=float,
@@ -492,8 +642,13 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     align_fused_stacks_xy(config_path=args.config_path,
+                          scale=args.scale,
+                          patch_size=args.patch_size,
+                          stride=args.stride,
+                          img_on_top=args.img_on_top,
                           num_workers=args.num_workers,
                           overwrite=args.overwrite,
                           wipe_progress_stack=args.wipe_progress_stack,
                           retry_missing_slices=args.retry_missing_slices,
+                          retry_slice_selection=args.retry_slice_selection,
                           max_canvas_scale=args.max_canvas_scale)
