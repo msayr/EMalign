@@ -28,6 +28,37 @@ class CanvasSizeError(RuntimeError):
     """Raised when a fused stitch would create an implausibly large canvas."""
 
 
+class OverlapLimitError(RuntimeError):
+    """Raised when an estimated stitch overlaps an existing tile too much."""
+
+
+def _raise_if_overlap_too_large(mask1, mask2, max_overlap_percent):
+    """Reject transforms where the moving image overlaps too much of one existing canvas.
+
+    The percentage is measured against the moving tile's valid mask area. This catches
+    pathological estimates that place a full tile on top of an existing tile while
+    preserving the default behavior when no limit is configured.
+    """
+    if max_overlap_percent is None:
+        return
+
+    if max_overlap_percent < 0 or max_overlap_percent > 100:
+        raise ValueError('max_overlap_percent must be between 0 and 100.')
+
+    moving_area = np.count_nonzero(mask2)
+    if moving_area == 0:
+        return
+
+    overlap_area = np.count_nonzero(mask1 & mask2)
+    overlap_percent = overlap_area / moving_area * 100
+    if overlap_percent > max_overlap_percent:
+        raise OverlapLimitError(
+            f'Estimated stitch overlaps {overlap_percent:.2f}% of the moving tile, '
+            f'exceeding the configured maximum of {max_overlap_percent:.2f}%. '
+            'This may indicate that SIFT placed one tile on top of another.'
+        )
+
+
 def _max_fused_canvas_shape(img1_shape, img2_shape, max_canvas_scale):
     """Return the largest acceptable YX shape for fusing overlapping stack images."""
     return np.ceil(np.maximum(img1_shape, img2_shape) * max_canvas_scale).astype(int)
@@ -170,6 +201,7 @@ def stitch_images(img1,
                   img_q_fun=None,
                   resize_canvas=True,
                   max_canvas_scale=1.5,
+                  max_overlap_percent=None,
                   **kwargs):
     
     '''Stitch two images on the same slice. 
@@ -179,6 +211,7 @@ def stitch_images(img1,
 
     img_q_fun: function taking image and mask as arguments, returns a value higher for higher quality/sharpness.
     e.g.: img_q_fun = lambda img, m: compute_laplacian_var(img, m)*0.5 + compute_sobel_mean(img, m) + compute_grad_mag(img, m)*100
+    max_overlap_percent: optional maximum percent of the moving tile that may overlap the current fused canvas.
     '''
 
     original_img1_shape = np.array(img1.shape)
@@ -242,6 +275,8 @@ def stitch_images(img1,
     )
     img1, img2 = homogenize_arrays_shape([img1, img2])
     mask1, mask2 = homogenize_arrays_shape([mask1, mask2])
+
+    _raise_if_overlap_too_large(mask1, mask2, max_overlap_percent)
 
     if img_on_top == 'auto':
         # Determine automatically what image to put on top

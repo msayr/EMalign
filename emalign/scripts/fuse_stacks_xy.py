@@ -59,7 +59,7 @@ def _preconfigure_thread_env_from_cli(argv=None):
 
 _preconfigure_thread_env_from_cli()
 
-from emalign.align_xy.stitch_offgrid import stitch_images
+from emalign.align_xy.stitch_offgrid import OverlapLimitError, stitch_images
 from emalign.io.progress import get_mongo_client, get_mongo_db, log_progress, wipe_progress
 from emalign.io.store import write_data, open_store
 import tensorstore as ts
@@ -206,7 +206,8 @@ def fuse_stacks_group(config,
                       wipe_progress_flag=False,
                       retry_missing_slices=True,
                       num_workers=1,
-                      max_canvas_scale=1.5):
+                      max_canvas_scale=1.5,
+                      max_overlap_percent=None):
     '''Fuse a group of stacks that overlap on the XY plane.
 
     Args:
@@ -228,6 +229,8 @@ def fuse_stacks_group(config,
         num_workers (int, optional): Number of threads used to render the final image by `sofima.warp.ndimage_warp`. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the
             larger input image. Set to None to disable. Defaults to 1.5.
+        max_overlap_percent (float or None, optional): Maximum percent of a moving tile that may
+            overlap the current fused canvas. Set to None to disable. Defaults to None.
     '''
 
 
@@ -336,6 +339,7 @@ def fuse_stacks_group(config,
         canvas = None
         canvas_mask = None
         failed_images = []
+        overlap_limit_exceeded = False
         pbar_stacks = tqdm(datasets, position=2, leave=False)
         for stack in pbar_stacks:
             pbar_stacks.set_description(f'Slice {z} in progress...')
@@ -389,9 +393,21 @@ def fuse_stacks_group(config,
                                                     img_on_top=img_on_top,
                                                     img_q_fun=img_q_fun,
                                                     max_canvas_scale=max_canvas_scale,
+                                                    max_overlap_percent=max_overlap_percent,
                                                     k0=k0,
                                                     k=k,
                                                     gamma=gamma)
+            except OverlapLimitError as e:
+                failed_record = build_failed_fuse_record(stack, z, global_slice_index, 'stitch_overlap_limit', e)
+                log_failed_fuse_image(failed_alignment_log_path, failed_record)
+                failed_summary = summarize_failed_fuse_record(failed_record)
+                failed_images.append(failed_summary)
+                overlap_limit_exceeded = True
+                logging.exception(
+                    'Aborting fused slice because a stack image exceeded the max-overlap limit: %s',
+                    failed_summary,
+                )
+                break
             except Exception as e:
                 failed_record = build_failed_fuse_record(stack, z, global_slice_index, 'stitch', e)
                 log_failed_fuse_image(failed_alignment_log_path, failed_record)
@@ -404,7 +420,7 @@ def fuse_stacks_group(config,
                 continue
             
 
-        if canvas is not None:
+        if canvas is not None and not overlap_limit_exceeded:
             pbarz.set_description('Writing slice...')
             destination, _ = write_data(destination, canvas, z)
             destination_mask, _ = write_data(destination_mask, canvas_mask, z)
@@ -420,14 +436,16 @@ def fuse_stacks_group(config,
                             'gamma':gamma
                             },
             'empty_slice': canvas is None,
+            'overlap_limit_exceeded': overlap_limit_exceeded,
             'completed': completed,
-            'status': 'completed' if completed else 'incomplete',
+            'status': 'failed_overlap_limit' if overlap_limit_exceeded else ('completed' if completed else 'incomplete'),
             'failed_image_count': len(failed_images),
             'failed_images': failed_images,
             'failed_alignment_log_path': failed_alignment_log_path,
             'scale': scale,
             'img_on_top': img_on_top,
-            'max_canvas_scale': max_canvas_scale
+            'max_canvas_scale': max_canvas_scale,
+            'max_overlap_percent': max_overlap_percent
                 }
         log_progress(db, destination_name, step_name, global_slice_index, z, metadata)
 
@@ -451,7 +469,8 @@ def align_fused_stacks_xy(config_path,
                           wipe_progress_stack=None,
                           retry_missing_slices=True,
                           num_workers=1,
-                          max_canvas_scale=1.5):
+                          max_canvas_scale=1.5,
+                          max_overlap_percent=None):
     '''Align groups of overlapping stacks one after the other.
 
     Args:
@@ -465,6 +484,7 @@ def align_fused_stacks_xy(config_path,
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records. Defaults to True.
         num_workers (int, optional): _description_. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the larger input image.
+        max_overlap_percent (float or None, optional): Maximum percent of a moving tile that may overlap the current fused canvas.
     '''
     
     with open(config_path, 'r') as f:
@@ -505,7 +525,8 @@ def align_fused_stacks_xy(config_path,
                           wipe_progress_flag=wipe_this_stack,
                           retry_missing_slices=retry_missing_slices,
                           num_workers=num_workers,
-                          max_canvas_scale=max_canvas_scale)
+                          max_canvas_scale=max_canvas_scale,
+                          max_overlap_percent=max_overlap_percent)
     logging.info(f'All {len(fused_configs)} stacks were fused!')
 
 
@@ -560,6 +581,11 @@ def build_parser():
                         type=float,
                         default=1.5,
                         help='Maximum fused XY canvas shape as a multiple of the larger input image. Default: 1.5')
+    parser.add_argument('--max-overlap',
+                        dest='max_overlap_percent',
+                        type=float,
+                        default=None,
+                        help='Maximum percent of a moving tile that may overlap the current fused canvas. For example, 25 allows at most 25%% overlap. Default: disabled')
     return parser
 
 
@@ -576,7 +602,8 @@ def main():
                           overwrite=args.overwrite,
                           wipe_progress_stack=args.wipe_progress_stack,
                           retry_missing_slices=args.retry_missing_slices,
-                          max_canvas_scale=args.max_canvas_scale)
+                          max_canvas_scale=args.max_canvas_scale,
+                          max_overlap_percent=args.max_overlap_percent)
 
 
 if __name__ == '__main__':
