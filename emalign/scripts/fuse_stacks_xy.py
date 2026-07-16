@@ -59,7 +59,7 @@ def _preconfigure_thread_env_from_cli(argv=None):
 
 _preconfigure_thread_env_from_cli()
 
-from emalign.align_xy.stitch_offgrid import stitch_images
+from emalign.align_xy.stitch_offgrid import OverlapLimitError, stitch_images
 from emalign.io.progress import get_mongo_client, get_mongo_db, log_progress, wipe_progress
 from emalign.io.store import write_data, open_store
 import tensorstore as ts
@@ -339,6 +339,7 @@ def fuse_stacks_group(config,
         canvas = None
         canvas_mask = None
         failed_images = []
+        overlap_limit_exceeded = False
         pbar_stacks = tqdm(datasets, position=2, leave=False)
         for stack in pbar_stacks:
             pbar_stacks.set_description(f'Slice {z} in progress...')
@@ -396,6 +397,17 @@ def fuse_stacks_group(config,
                                                     k0=k0,
                                                     k=k,
                                                     gamma=gamma)
+            except OverlapLimitError as e:
+                failed_record = build_failed_fuse_record(stack, z, global_slice_index, 'stitch_overlap_limit', e)
+                log_failed_fuse_image(failed_alignment_log_path, failed_record)
+                failed_summary = summarize_failed_fuse_record(failed_record)
+                failed_images.append(failed_summary)
+                overlap_limit_exceeded = True
+                logging.exception(
+                    'Aborting fused slice because a stack image exceeded the max-overlap limit: %s',
+                    failed_summary,
+                )
+                break
             except Exception as e:
                 failed_record = build_failed_fuse_record(stack, z, global_slice_index, 'stitch', e)
                 log_failed_fuse_image(failed_alignment_log_path, failed_record)
@@ -408,7 +420,7 @@ def fuse_stacks_group(config,
                 continue
             
 
-        if canvas is not None:
+        if canvas is not None and not overlap_limit_exceeded:
             pbarz.set_description('Writing slice...')
             destination, _ = write_data(destination, canvas, z)
             destination_mask, _ = write_data(destination_mask, canvas_mask, z)
@@ -424,8 +436,9 @@ def fuse_stacks_group(config,
                             'gamma':gamma
                             },
             'empty_slice': canvas is None,
+            'overlap_limit_exceeded': overlap_limit_exceeded,
             'completed': completed,
-            'status': 'completed' if completed else 'incomplete',
+            'status': 'failed_overlap_limit' if overlap_limit_exceeded else ('completed' if completed else 'incomplete'),
             'failed_image_count': len(failed_images),
             'failed_images': failed_images,
             'failed_alignment_log_path': failed_alignment_log_path,
