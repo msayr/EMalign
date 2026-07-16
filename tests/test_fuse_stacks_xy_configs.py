@@ -147,3 +147,64 @@ def test_early_core_parser_does_not_treat_config_flag_as_cores():
     assert module._extract_cores_arg([
         '-cfg', '/tmp/main_config.json',
     ]) is None
+
+
+def test_build_parser_exposes_max_overlap_limit():
+    module = _module()
+
+    args = module.build_parser().parse_args([
+        '--config', '/tmp/main_config.json',
+        '--max-overlap', '25',
+    ])
+
+    assert args.max_overlap_percent == 25
+
+
+def test_main_passes_max_overlap_limit(monkeypatch):
+    module = _module()
+    captured = {}
+
+    def fake_align_fused_stacks_xy(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(module, 'align_fused_stacks_xy', fake_align_fused_stacks_xy)
+    monkeypatch.setattr(sys, 'argv', [
+        'fuse_stacks_xy',
+        '--config', '/tmp/main_config.json',
+        '--max-overlap', '50',
+    ])
+
+    module.main()
+
+    assert captured['max_overlap_percent'] == 50
+
+
+def test_overlap_limit_rejects_excessive_overlap():
+    _install_import_stubs()
+    import numpy as np
+    from emalign.align_xy.stitch_offgrid import OverlapLimitError, _raise_if_overlap_too_large
+
+    existing = np.zeros((10, 10), dtype=bool)
+    moving = np.zeros((10, 10), dtype=bool)
+    existing[:, :5] = True
+    moving[:, :8] = True
+
+    try:
+        _raise_if_overlap_too_large(existing, moving, 50)
+    except OverlapLimitError:
+        pass
+    else:
+        raise AssertionError('Expected OverlapLimitError for 62.5% overlap with a 50% limit')
+
+
+def test_overlap_limit_allows_overlap_at_limit():
+    _install_import_stubs()
+    import numpy as np
+    from emalign.align_xy.stitch_offgrid import _raise_if_overlap_too_large
+
+    existing = np.zeros((10, 10), dtype=bool)
+    moving = np.zeros((10, 10), dtype=bool)
+    existing[:, :5] = True
+    moving[:, :10] = True
+
+    _raise_if_overlap_too_large(existing, moving, 50)
