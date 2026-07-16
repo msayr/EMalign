@@ -173,6 +173,33 @@ def slice_is_selected(local_slice_index, retry_slice_selection, substack_index=N
     return False
 
 
+def clear_destination_slice(destination, destination_mask, z):
+    """Clear one existing fused image and mask slice before rewriting it.
+
+    Targeted retries may produce a smaller canvas than the previous attempt. TensorStore
+    writes only cover the new canvas extent, so stale pixels outside that extent would
+    otherwise remain in the destination slice and make it look as though tiles were
+    duplicated or unrelated slices changed. Clearing only the selected z-plane keeps
+    retry writes isolated to the exact requested slice.
+    """
+    destination = destination.resolve().result()
+    destination_mask = destination_mask.resolve().result()
+
+    dest_shape = tuple(int(v) for v in destination.domain.exclusive_max)
+    mask_shape = tuple(int(v) for v in destination_mask.domain.exclusive_max)
+
+    if z >= dest_shape[0] or z >= mask_shape[0]:
+        return destination, destination_mask
+
+    destination[z:z + 1, :dest_shape[1], :dest_shape[2]].write(
+        0, can_reference_source_data_indefinitely=True
+    ).result()
+    destination_mask[z:z + 1, :mask_shape[1], :mask_shape[2]].write(
+        False, can_reference_source_data_indefinitely=True
+    ).result()
+    return destination, destination_mask
+
+
 def get_fused_configs(
         main_config_path,
         scale=0.1
@@ -442,6 +469,8 @@ def fuse_stacks_group(config,
 
         if canvas is not None:
             pbarz.set_description('Writing slice...')
+            if force_retry_slice and not overwrite:
+                destination, destination_mask = clear_destination_slice(destination, destination_mask, z)
             destination, _ = write_data(destination, canvas, z)
             destination_mask, _ = write_data(destination_mask, canvas_mask, z)
 
