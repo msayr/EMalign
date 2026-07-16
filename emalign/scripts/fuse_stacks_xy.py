@@ -76,23 +76,24 @@ import importlib.util
 
 
 
-def _load_manual_reference_images(config, target_res):
-    """Load one downsampled reference image per dataset in a fuse config."""
+def _load_manual_reference_images(config, target_res, gui_downsample=0.1):
+    """Load one display-resolution reference image per dataset in a fuse config."""
     images = []
     for z_offset, ds_path in zip(config['z_offsets'], config['dataset_paths']):
         ds = open_store(ds_path, mode='r')
         source_z = config['zmin'] - z_offset
         img = ds[source_z].read().result()
         attrs = get_store_attributes(ds)
-        scale = attrs['resolution'][-1] / target_res
+        scale = attrs['resolution'][-1] / target_res * gui_downsample
         images.append(resample(img, scale))
     return images
 
 
-def _normalise_manual_offsets(offsets):
-    """Move offsets so the minimum y/x coordinate is zero and return plain ints."""
-    arr = np.asarray(offsets, dtype=int)
+def _normalise_manual_offsets(offsets, scale=1):
+    """Move offsets to origin, convert from display pixels, and return plain ints."""
+    arr = np.asarray(offsets, dtype=float)
     arr = arr - arr.min(axis=0)
+    arr = np.rint(arr / scale).astype(int)
     return [[int(y), int(x)] for y, x in arr]
 
 
@@ -108,47 +109,85 @@ def _prompt_manual_offsets_cli(config, initial_offsets):
     return _normalise_manual_offsets(offsets)
 
 
-def confirm_manual_xy_offsets(config, target_res):
+def _set_manual_xy_view(ax, offsets, images, margin_fraction=0.2):
+    """Zoom the manual XY axes out enough to show all draggable stack images."""
+    offsets = np.asarray(offsets, dtype=float)
+    min_yx = offsets.min(axis=0)
+    max_yx = np.max([
+        offsets[i] + np.array(images[i].shape[:2])
+        for i in range(len(images))
+    ], axis=0)
+    span_yx = np.maximum(max_yx - min_yx, 1)
+    margin_yx = np.maximum(span_yx * margin_fraction, 25)
+    ax.set_xlim(min_yx[1] - margin_yx[1], max_yx[1] + margin_yx[1])
+    ax.set_ylim(max_yx[0] + margin_yx[0], min_yx[0] - margin_yx[0])
+
+
+def confirm_manual_xy_offsets(config, target_res, gui_downsample=0.1):
     """Open a draggable matplotlib UI to confirm rough stack XY positions."""
-    images = _load_manual_reference_images(config, target_res)
-    offsets = [[0, 0] for _ in images]
+    full_res_offsets = [[0, 0] for _ in config['dataset_paths']]
     if importlib.util.find_spec('matplotlib') is None:
-        return _prompt_manual_offsets_cli(config, offsets)
+        return _prompt_manual_offsets_cli(config, full_res_offsets)
+
+    images = _load_manual_reference_images(config, target_res, gui_downsample=gui_downsample)
+    offsets = [[0, 0] for _ in images]
 
     import matplotlib.pyplot as plt
-    from matplotlib.widgets import Button
+    import matplotlib.patches as mpatches
+    from matplotlib.widgets import Button, RadioButtons
 
-    fig, ax = plt.subplots()
-    plt.subplots_adjust(bottom=0.2)
+    fig, ax = plt.subplots(figsize=(12, 8))
+    plt.subplots_adjust(left=0.24, bottom=0.22, right=0.98, top=0.9)
     artists = []
-    selected = {'artist': None, 'press': None}
+    selected = {'index': 0, 'press': None}
     colors = ['red', 'cyan', 'yellow', 'lime', 'magenta', 'orange']
     for i, (img, path) in enumerate(zip(images, config['dataset_paths'])):
-        artist = ax.imshow(img, alpha=0.45, cmap='gray', origin='upper')
-        artist.set_label(f'{i}: {os.path.basename(path)}')
-        artist._emalign_index = i
+        artist = ax.imshow(
+            img,
+            alpha=0.45,
+            cmap='gray',
+            origin='upper',
+            extent=(0, img.shape[1], img.shape[0], 0),
+        )
         artists.append(artist)
-        ax.text(0, i * 25, str(i), color=colors[i % len(colors)], fontsize=14, weight='bold')
-    ax.set_title('Drag stack images into rough XY alignment, then click Accept')
-    ax.legend(loc='upper right')
+        ax.text(5, 20 + i * 25, str(i), color=colors[i % len(colors)], fontsize=14, weight='bold')
+    ax.set_title('Manual XY guide: select a stack, then left-drag it into rough alignment')
+    legend_handles = [
+        mpatches.Patch(color=colors[i % len(colors)], label=f'{i}: {os.path.basename(path)}')
+        for i, path in enumerate(config['dataset_paths'])
+    ]
+    ax.legend(handles=legend_handles, loc='upper right', title='Stack index')
+    instructions = (
+        '1) Select stack index at left.\n'
+        '2) Left-click and drag inside the image panel to move that stack.\n'
+        '3) Use Zoom out/Fit all if stacks move off-screen.\n'
+        'Toolbar pan/zoom still works for navigating the canvas.'
+    )
+    fig.text(0.24, 0.05, instructions, va='bottom')
+    _set_manual_xy_view(ax, offsets, images)
+
+    radio_ax = fig.add_axes([0.02, 0.35, 0.18, 0.5])
+    radio = RadioButtons(radio_ax, [str(i) for i in range(len(images))], active=0)
+    radio_ax.set_title('Move stack')
+
+    def select_stack(label):
+        selected['index'] = int(label)
+
+    radio.on_clicked(select_stack)
 
     def on_press(event):
-        if event.inaxes != ax:
+        if event.inaxes != ax or event.button != 1 or event.xdata is None or event.ydata is None:
             return
-        for artist in reversed(artists):
-            contains, _ = artist.contains(event)
-            if contains:
-                selected['artist'] = artist
-                selected['press'] = (event.xdata, event.ydata, offsets[artist._emalign_index][:])
-                return
+        idx = selected['index']
+        selected['press'] = (event.xdata, event.ydata, offsets[idx][:])
 
     def on_motion(event):
-        if selected['artist'] is None or event.inaxes != ax or event.xdata is None or event.ydata is None:
+        if selected['press'] is None or event.inaxes != ax or event.xdata is None or event.ydata is None:
             return
         x0, y0, old = selected['press']
-        idx = selected['artist']._emalign_index
+        idx = selected['index']
         offsets[idx] = [int(round(old[0] + event.ydata - y0)), int(round(old[1] + event.xdata - x0))]
-        selected['artist'].set_extent((
+        artists[idx].set_extent((
             offsets[idx][1],
             offsets[idx][1] + images[idx].shape[1],
             offsets[idx][0] + images[idx].shape[0],
@@ -157,23 +196,42 @@ def confirm_manual_xy_offsets(config, target_res):
         fig.canvas.draw_idle()
 
     def on_release(event):
-        selected['artist'] = None
         selected['press'] = None
 
     accepted = {'value': False}
+
     def accept(event):
         accepted['value'] = True
         plt.close(fig)
 
-    button = Button(fig.add_axes([0.8, 0.05, 0.12, 0.075]), 'Accept')
+    def fit_all(event):
+        _set_manual_xy_view(ax, offsets, images)
+        fig.canvas.draw_idle()
+
+    def zoom_out(event):
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        cx = (x0 + x1) / 2
+        cy = (y0 + y1) / 2
+        half_w = abs(x1 - x0)
+        half_h = abs(y1 - y0)
+        ax.set_xlim(cx - half_w, cx + half_w)
+        ax.set_ylim(cy + half_h, cy - half_h)
+        fig.canvas.draw_idle()
+
+    button = Button(fig.add_axes([0.84, 0.06, 0.12, 0.07]), 'Accept')
     button.on_clicked(accept)
+    fit_button = Button(fig.add_axes([0.70, 0.06, 0.12, 0.07]), 'Fit all')
+    fit_button.on_clicked(fit_all)
+    zoom_button = Button(fig.add_axes([0.56, 0.06, 0.12, 0.07]), 'Zoom out')
+    zoom_button.on_clicked(zoom_out)
     fig.canvas.mpl_connect('button_press_event', on_press)
     fig.canvas.mpl_connect('motion_notify_event', on_motion)
     fig.canvas.mpl_connect('button_release_event', on_release)
     plt.show()
     if not accepted['value']:
-        return _prompt_manual_offsets_cli(config, offsets)
-    return _normalise_manual_offsets(offsets)
+        return _prompt_manual_offsets_cli(config, full_res_offsets)
+    return _normalise_manual_offsets(offsets, scale=gui_downsample)
 
 
 # TODO: add a first slice test to make sure it is not missing images

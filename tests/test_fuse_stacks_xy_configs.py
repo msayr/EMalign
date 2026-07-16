@@ -183,3 +183,9 @@ def test_normalise_manual_offsets_moves_minimum_to_origin():
     module = _module()
 
     assert module._normalise_manual_offsets([[10, -5], [2, 7]]) == [[8, 0], [0, 12]]
+
+
+def test_normalise_manual_offsets_scales_display_pixels_to_output_pixels():
+    module = _module()
+
+    assert module._normalise_manual_offsets([[10, 20], [15, 35]], scale=0.1) == [[0, 0], [50, 150]]
