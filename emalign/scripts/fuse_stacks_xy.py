@@ -385,6 +385,7 @@ def fuse_stacks_group(config,
                                                     parallelism=num_workers,
                                                     img_on_top=img_on_top,
                                                     img_q_fun=img_q_fun,
+                                                    max_canvas_scale=None,
                                                     k0=k0,
                                                     k=k,
                                                     gamma=gamma)
