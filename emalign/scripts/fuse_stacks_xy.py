@@ -71,6 +71,109 @@ from emalign.align_xy.prep import create_configs_fused_stacks
 from emalign.arrays.utils import compute_laplacian_var, compute_sobel_mean, compute_grad_mag, resample
 from emalign.io.store import get_store_attributes, set_store_attributes
 from emalign.io.process.mask import compute_greyscale_mask
+import numpy as np
+import importlib.util
+
+
+
+def _load_manual_reference_images(config, target_res):
+    """Load one downsampled reference image per dataset in a fuse config."""
+    images = []
+    for z_offset, ds_path in zip(config['z_offsets'], config['dataset_paths']):
+        ds = open_store(ds_path, mode='r')
+        source_z = config['zmin'] - z_offset
+        img = ds[source_z].read().result()
+        attrs = get_store_attributes(ds)
+        scale = attrs['resolution'][-1] / target_res
+        images.append(resample(img, scale))
+    return images
+
+
+def _normalise_manual_offsets(offsets):
+    """Move offsets so the minimum y/x coordinate is zero and return plain ints."""
+    arr = np.asarray(offsets, dtype=int)
+    arr = arr - arr.min(axis=0)
+    return [[int(y), int(x)] for y, x in arr]
+
+
+def _prompt_manual_offsets_cli(config, initial_offsets):
+    """Allow manual offset entry when an interactive matplotlib backend is unavailable."""
+    offsets = [list(map(int, offset)) for offset in initial_offsets]
+    print('Manual XY guide offsets are shown as [y, x] pixels at the fused output resolution.')
+    for i, (path, offset) in enumerate(zip(config['dataset_paths'], offsets)):
+        answer = input(f'{i}: {os.path.basename(path)} offset {offset}; press Enter to keep or enter y,x: ').strip()
+        if answer:
+            y, x = answer.replace(',', ' ').split()[:2]
+            offsets[i] = [int(float(y)), int(float(x))]
+    return _normalise_manual_offsets(offsets)
+
+
+def confirm_manual_xy_offsets(config, target_res):
+    """Open a draggable matplotlib UI to confirm rough stack XY positions."""
+    images = _load_manual_reference_images(config, target_res)
+    offsets = [[0, 0] for _ in images]
+    if importlib.util.find_spec('matplotlib') is None:
+        return _prompt_manual_offsets_cli(config, offsets)
+
+    import matplotlib.pyplot as plt
+    from matplotlib.widgets import Button
+
+    fig, ax = plt.subplots()
+    plt.subplots_adjust(bottom=0.2)
+    artists = []
+    selected = {'artist': None, 'press': None}
+    colors = ['red', 'cyan', 'yellow', 'lime', 'magenta', 'orange']
+    for i, (img, path) in enumerate(zip(images, config['dataset_paths'])):
+        artist = ax.imshow(img, alpha=0.45, cmap='gray', origin='upper')
+        artist.set_label(f'{i}: {os.path.basename(path)}')
+        artist._emalign_index = i
+        artists.append(artist)
+        ax.text(0, i * 25, str(i), color=colors[i % len(colors)], fontsize=14, weight='bold')
+    ax.set_title('Drag stack images into rough XY alignment, then click Accept')
+    ax.legend(loc='upper right')
+
+    def on_press(event):
+        if event.inaxes != ax:
+            return
+        for artist in reversed(artists):
+            contains, _ = artist.contains(event)
+            if contains:
+                selected['artist'] = artist
+                selected['press'] = (event.xdata, event.ydata, offsets[artist._emalign_index][:])
+                return
+
+    def on_motion(event):
+        if selected['artist'] is None or event.inaxes != ax or event.xdata is None or event.ydata is None:
+            return
+        x0, y0, old = selected['press']
+        idx = selected['artist']._emalign_index
+        offsets[idx] = [int(round(old[0] + event.ydata - y0)), int(round(old[1] + event.xdata - x0))]
+        selected['artist'].set_extent((
+            offsets[idx][1],
+            offsets[idx][1] + images[idx].shape[1],
+            offsets[idx][0] + images[idx].shape[0],
+            offsets[idx][0],
+        ))
+        fig.canvas.draw_idle()
+
+    def on_release(event):
+        selected['artist'] = None
+        selected['press'] = None
+
+    accepted = {'value': False}
+    def accept(event):
+        accepted['value'] = True
+        plt.close(fig)
+
+    button = Button(fig.add_axes([0.8, 0.05, 0.12, 0.075]), 'Accept')
+    button.on_clicked(accept)
+    fig.canvas.mpl_connect('button_press_event', on_press)
+    fig.canvas.mpl_connect('motion_notify_event', on_motion)
+    fig.canvas.mpl_connect('button_release_event', on_release)
+    plt.show()
+    if not accepted['value']:
+        return _prompt_manual_offsets_cli(config, offsets)
+    return _normalise_manual_offsets(offsets)
 
 
 # TODO: add a first slice test to make sure it is not missing images
@@ -206,7 +309,8 @@ def fuse_stacks_group(config,
                       wipe_progress_flag=False,
                       retry_missing_slices=True,
                       num_workers=1,
-                      max_canvas_scale=1.5):
+                      max_canvas_scale=1.5,
+                      manual_xy_offsets=None):
     '''Fuse a group of stacks that overlap on the XY plane.
 
     Args:
@@ -228,6 +332,8 @@ def fuse_stacks_group(config,
         num_workers (int, optional): Number of threads used to render the final image by `sofima.warp.ndimage_warp`. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the
             larger input image. Set to None to disable. Defaults to 1.5.
+        manual_xy_offsets (list[list[int]] or None): Optional rough [y, x] positions for each
+            dataset, in the same order as config['dataset_paths'].
     '''
 
 
@@ -271,6 +377,11 @@ def fuse_stacks_group(config,
             ds_mask_path = None
             ds_mask = None
         datasets.append({
+            'manual_xy_offset': (
+                None
+                if manual_xy_offsets is None
+                else np.asarray(manual_xy_offsets[len(datasets)], dtype=int)
+            ),
             'dataset': ds,
             'dataset_mask': ds_mask,
             'target_scale': s,
@@ -335,6 +446,7 @@ def fuse_stacks_group(config,
         pbarz.set_description(f'Fusing stacks...')
         canvas = None
         canvas_mask = None
+        canvas_origin = None
         failed_images = []
         pbar_stacks = tqdm(datasets, position=2, leave=False)
         for stack in pbar_stacks:
@@ -374,15 +486,21 @@ def fuse_stacks_group(config,
                 # First image
                 canvas = img.copy()
                 canvas_mask = mask.copy()
+                canvas_origin = stack['manual_xy_offset'] if stack['manual_xy_offset'] is not None else np.array([0, 0])
                 continue
             
             # Stitch images to canvas
             try:
+                initial_offset = None
+                if stack['manual_xy_offset'] is not None:
+                    initial_offset = stack['manual_xy_offset'] - canvas_origin
                 canvas, canvas_mask = stitch_images(canvas, 
                                                     img,
                                                     mask1=canvas_mask, 
                                                     mask2=mask,
                                                     scale=scale,
+                                                    initial_offset=initial_offset,
+                                                    use_initial_offset_only=initial_offset is not None,
                                                     patch_size=patch_size,
                                                     stride=stride,
                                                     parallelism=num_workers,
@@ -392,6 +510,9 @@ def fuse_stacks_group(config,
                                                     k0=k0,
                                                     k=k,
                                                     gamma=gamma)
+                if initial_offset is not None:
+                    all_offsets = np.stack([canvas_origin, stack['manual_xy_offset']])
+                    canvas_origin = all_offsets.min(axis=0)
             except Exception as e:
                 failed_record = build_failed_fuse_record(stack, z, global_slice_index, 'stitch', e)
                 log_failed_fuse_image(failed_alignment_log_path, failed_record)
@@ -451,7 +572,8 @@ def align_fused_stacks_xy(config_path,
                           wipe_progress_stack=None,
                           retry_missing_slices=True,
                           num_workers=1,
-                          max_canvas_scale=1.5):
+                          max_canvas_scale=1.5,
+                          manual_xy=False):
     '''Align groups of overlapping stacks one after the other.
 
     Args:
@@ -465,6 +587,7 @@ def align_fused_stacks_xy(config_path,
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records. Defaults to True.
         num_workers (int, optional): _description_. Defaults to 1.
         max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the larger input image.
+        manual_xy (bool): Prompt for draggable manual rough XY offsets before fusing each group.
     '''
     
     with open(config_path, 'r') as f:
@@ -487,6 +610,10 @@ def align_fused_stacks_xy(config_path,
     
     pbar = tqdm(fused_configs, position=0, leave=True)
     for config in pbar:
+        manual_xy_offsets = None
+        if manual_xy:
+            manual_xy_offsets = confirm_manual_xy_offsets(config, target_res)
+            config['manual_xy_offsets'] = manual_xy_offsets
         pbar.set_description(f'z = {config['zmin']} - {config['zmax']}: Processing group of stacks...')
         destination_name = '_'.join([os.path.basename(os.path.abspath(ds)) for ds in config['dataset_paths']])
         destination_name += '_fused'
@@ -505,7 +632,8 @@ def align_fused_stacks_xy(config_path,
                           wipe_progress_flag=wipe_this_stack,
                           retry_missing_slices=retry_missing_slices,
                           num_workers=num_workers,
-                          max_canvas_scale=max_canvas_scale)
+                          max_canvas_scale=max_canvas_scale,
+                          manual_xy_offsets=manual_xy_offsets)
     logging.info(f'All {len(fused_configs)} stacks were fused!')
 
 
@@ -555,6 +683,10 @@ def build_parser():
                         action='store_false',
                         help='Skip slices with any existing progress record, including incomplete slices. Default: retry incomplete slices.')
     parser.set_defaults(retry_missing_slices=True)
+    parser.add_argument('--manual-xy',
+                        dest='manual_xy',
+                        action='store_true',
+                        help='Open a draggable GUI before each fuse group so users can confirm or correct rough relative XY stack positions.')
     parser.add_argument('--max-canvas-scale',
                         dest='max_canvas_scale',
                         type=float,
@@ -576,7 +708,8 @@ def main():
                           overwrite=args.overwrite,
                           wipe_progress_stack=args.wipe_progress_stack,
                           retry_missing_slices=args.retry_missing_slices,
-                          max_canvas_scale=args.max_canvas_scale)
+                          max_canvas_scale=args.max_canvas_scale,
+                          manual_xy=args.manual_xy)
 
 
 if __name__ == '__main__':

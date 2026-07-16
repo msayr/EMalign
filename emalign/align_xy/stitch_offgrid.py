@@ -163,6 +163,8 @@ def stitch_images(img1,
                   mask1=None, 
                   mask2=None,
                   scale=0.1,
+                  initial_offset=None,
+                  use_initial_offset_only=False,
                   patch_size=160,
                   stride=40,
                   parallelism=1,
@@ -177,6 +179,10 @@ def stitch_images(img1,
     Img1 is the reference, img2 is the moving image.
     Img1 is the one being rotated and offset when necessary, because the rotation would result in a staircase artifact at the boundaries of the mesh.
 
+    initial_offset: optional (y, x) top-left offset of img2 relative to img1.
+        When provided, images are padded into that rough arrangement before registration.
+    use_initial_offset_only: if True, skip SIFT affine estimation and use initial_offset
+        directly as the affine guide before elastic refinement.
     img_q_fun: function taking image and mask as arguments, returns a value higher for higher quality/sharpness.
     e.g.: img_q_fun = lambda img, m: compute_laplacian_var(img, m)*0.5 + compute_sobel_mean(img, m) + compute_grad_mag(img, m)*100
     '''
@@ -192,15 +198,35 @@ def stitch_images(img1,
     mask1 = mask1.astype(bool)
     mask2 = mask2.astype(bool)
 
-    # Estimate and apply transformation to reference image
-    M, img1_shape, img2_offset, robust_estimate, robustness_metrics = estimate_transform_sift(
-        img2,
-        img1,
-        scale,
-        ref_mask=mask2,
-        mov_mask=mask1,
-        refine_estimate=True,
-    )
+    if initial_offset is not None:
+        initial_offset = np.asarray(initial_offset, dtype=int)
+        if initial_offset.shape != (2,):
+            raise ValueError('initial_offset must be a two-value (y, x) offset')
+        pad1_before = np.maximum(initial_offset, 0)
+        pad2_before = np.maximum(-initial_offset, 0)
+        target_shape = np.maximum(pad1_before + np.array(img1.shape), pad2_before + np.array(img2.shape))
+        pad1_after = target_shape - pad1_before - np.array(img1.shape)
+        pad2_after = target_shape - pad2_before - np.array(img2.shape)
+        img1 = np.pad(img1, [(pad1_before[0], pad1_after[0]), (pad1_before[1], pad1_after[1])])
+        mask1 = np.pad(mask1, [(pad1_before[0], pad1_after[0]), (pad1_before[1], pad1_after[1])])
+        img2 = np.pad(img2, [(pad2_before[0], pad2_after[0]), (pad2_before[1], pad2_after[1])])
+        mask2 = np.pad(mask2, [(pad2_before[0], pad2_after[0]), (pad2_before[1], pad2_after[1])])
+        if use_initial_offset_only:
+            M = np.array([[1, 0, 0], [0, 1, 0]], dtype=float)
+            img1_shape = np.array(img1.shape)
+            img2_offset = np.array([0, 0])
+        else:
+            M, img1_shape, img2_offset, robust_estimate, robustness_metrics = estimate_transform_sift(
+                img2, img1, scale, ref_mask=mask2, mov_mask=mask1, refine_estimate=True)
+    else:
+        M, img1_shape, img2_offset, robust_estimate, robustness_metrics = estimate_transform_sift(
+            img2,
+            img1,
+            scale,
+            ref_mask=mask2,
+            mov_mask=mask1,
+            refine_estimate=True,
+        )
     if M is None or img1_shape is None or img2_offset is None:
         raise TransformEstimationError(
             'SIFT could not estimate a valid transform between the fused canvas and stack image '
