@@ -423,7 +423,7 @@ def align_fused_stacks_xy(config_path,
 
 
     fused_configs = get_fused_configs(config_path,
-                                      0.1)
+                                      scale=scale)
     
     # Function to determine image quality to choose which one is on top
     # Highest value == on top
@@ -454,11 +454,8 @@ def align_fused_stacks_xy(config_path,
     logging.info(f'All {len(fused_configs)} stacks were fused!')
 
 
-if __name__ == '__main__':
-
-
-    parser=argparse.ArgumentParser('Script aligning tiles in XY based on SOFIMA (Scalable Optical Flow-based Image Montaging and Alignment). \n\
-                                    This script was written to match the file structure produced by the ThermoFisher MAPs software.')
+def build_parser():
+    parser = argparse.ArgumentParser('Script aligning tiles in XY based on SOFIMA (Scalable Optical Flow-based Image Montaging and Alignment). \n                                    This script was written to match the file structure produced by the ThermoFisher MAPs software.')
     parser.add_argument('-cfg', '--config',
                         metavar='CONFIG_PATH',
                         dest='config_path',
@@ -472,6 +469,26 @@ if __name__ == '__main__':
                         default=1,
                         type=int,
                         help='Number of threads to use for rendering. Default: 1')
+    parser.add_argument('--scale',
+                        dest='scale',
+                        type=float,
+                        default=0.1,
+                        help='Downsampling scale used when estimating XY offsets with SIFT. Default: 0.1')
+    parser.add_argument('--patch-size',
+                        dest='patch_size',
+                        type=int,
+                        default=160,
+                        help='Patch size used to compute the optical flow map. Default: 160')
+    parser.add_argument('--stride',
+                        dest='stride',
+                        type=int,
+                        default=40,
+                        help='Stride used to compute the optical flow map. Default: 40')
+    parser.add_argument('--img-on-top',
+                        dest='img_on_top',
+                        choices=['auto', '1', '2'],
+                        default='auto',
+                        help='Which image should be rendered on top during fusion. Choices: auto, 1, 2. Default: auto')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing dataset.')
     parser.add_argument('--wipe-progress',
                         dest='wipe_progress_stack',
@@ -488,12 +505,24 @@ if __name__ == '__main__':
                         type=float,
                         default=1.5,
                         help='Maximum fused XY canvas shape as a multiple of the larger input image. Default: 1.5')
+    return parser
 
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     align_fused_stacks_xy(config_path=args.config_path,
+                          scale=args.scale,
+                          patch_size=args.patch_size,
+                          stride=args.stride,
+                          img_on_top=args.img_on_top,
                           num_workers=args.num_workers,
                           overwrite=args.overwrite,
                           wipe_progress_stack=args.wipe_progress_stack,
                           retry_missing_slices=args.retry_missing_slices,
                           max_canvas_scale=args.max_canvas_scale)
+
+
+if __name__ == '__main__':
+    main()

@@ -58,3 +58,47 @@ def test_is_fuse_config_rejects_diagnostics_json():
         'fallback_group_count': 1,
         'groups': [],
     })
+
+
+def test_build_parser_exposes_fusion_parameter_overrides():
+    module = _module()
+
+    args = module.build_parser().parse_args([
+        '--config', '/tmp/main_config.json',
+        '--scale', '0.25',
+        '--patch-size', '96',
+        '--stride', '24',
+        '--img-on-top', '2',
+    ])
+
+    assert args.config_path == '/tmp/main_config.json'
+    assert args.scale == 0.25
+    assert args.patch_size == 96
+    assert args.stride == 24
+    assert args.img_on_top == '2'
+
+
+def test_main_passes_fusion_parameter_overrides(monkeypatch):
+    module = _module()
+    captured = {}
+
+    def fake_align_fused_stacks_xy(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(module, 'align_fused_stacks_xy', fake_align_fused_stacks_xy)
+    monkeypatch.setattr(sys, 'argv', [
+        'fuse_stacks_xy',
+        '--config', '/tmp/main_config.json',
+        '--scale', '0.2',
+        '--patch-size', '128',
+        '--stride', '32',
+        '--img-on-top', '1',
+    ])
+
+    module.main()
+
+    assert captured['config_path'] == '/tmp/main_config.json'
+    assert captured['scale'] == 0.2
+    assert captured['patch_size'] == 128
+    assert captured['stride'] == 32
+    assert captured['img_on_top'] == '1'
