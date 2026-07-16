@@ -147,3 +147,45 @@ def test_early_core_parser_does_not_treat_config_flag_as_cores():
     assert module._extract_cores_arg([
         '-cfg', '/tmp/main_config.json',
     ]) is None
+
+
+def test_build_parser_exposes_manual_xy_flag():
+    module = _module()
+
+    args = module.build_parser().parse_args([
+        '--config', '/tmp/main_config.json',
+        '--manual-xy',
+    ])
+
+    assert args.manual_xy is True
+
+
+def test_main_passes_manual_xy_flag(monkeypatch):
+    module = _module()
+    captured = {}
+
+    def fake_align_fused_stacks_xy(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(module, 'align_fused_stacks_xy', fake_align_fused_stacks_xy)
+    monkeypatch.setattr(sys, 'argv', [
+        'fuse_stacks_xy',
+        '--config', '/tmp/main_config.json',
+        '--manual-xy',
+    ])
+
+    module.main()
+
+    assert captured['manual_xy'] is True
+
+
+def test_normalise_manual_offsets_moves_minimum_to_origin():
+    module = _module()
+
+    assert module._normalise_manual_offsets([[10, -5], [2, 7]]) == [[8, 0], [0, 12]]
+
+
+def test_normalise_manual_offsets_scales_display_pixels_to_output_pixels():
+    module = _module()
+
+    assert module._normalise_manual_offsets([[10, 20], [15, 35]], scale=0.1) == [[0, 0], [50, 150]]
