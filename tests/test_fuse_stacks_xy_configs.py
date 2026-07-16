@@ -1,4 +1,5 @@
 import importlib
+import os
 import sys
 import types
 
@@ -102,3 +103,31 @@ def test_main_passes_fusion_parameter_overrides(monkeypatch):
     assert captured['patch_size'] == 128
     assert captured['stride'] == 32
     assert captured['img_on_top'] == '1'
+
+
+def test_thread_env_uses_core_count_without_overriding_existing_env(monkeypatch):
+    module = _module()
+    thread_env_names = [
+        'OMP_NUM_THREADS',
+        'OPENBLAS_NUM_THREADS',
+        'MKL_NUM_THREADS',
+        'NUMEXPR_NUM_THREADS',
+        'VECLIB_MAXIMUM_THREADS',
+        'XLA_FLAGS',
+    ]
+    for name in thread_env_names:
+        monkeypatch.delenv(name, raising=False)
+
+    module.configure_thread_env(2)
+
+    assert os.environ['OMP_NUM_THREADS'] == '2'
+    assert os.environ['OPENBLAS_NUM_THREADS'] == '2'
+    assert os.environ['MKL_NUM_THREADS'] == '2'
+    assert os.environ['NUMEXPR_NUM_THREADS'] == '2'
+    assert os.environ['VECLIB_MAXIMUM_THREADS'] == '2'
+    assert 'intra_op_parallelism_threads=2' in os.environ['XLA_FLAGS']
+
+    monkeypatch.setenv('OMP_NUM_THREADS', '8')
+    module.configure_thread_env(1)
+
+    assert os.environ['OMP_NUM_THREADS'] == '8'

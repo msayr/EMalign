@@ -4,6 +4,43 @@ import logging
 import os
 import traceback
 from datetime import datetime, UTC
+
+
+def _limited_thread_env(num_workers):
+    """Return environment settings that cap common CPU thread pools."""
+    if num_workers is None or num_workers < 1:
+        return {}
+
+    worker_count = str(num_workers)
+    return {
+        'OMP_NUM_THREADS': worker_count,
+        'OPENBLAS_NUM_THREADS': worker_count,
+        'MKL_NUM_THREADS': worker_count,
+        'NUMEXPR_NUM_THREADS': worker_count,
+        'VECLIB_MAXIMUM_THREADS': worker_count,
+        'XLA_FLAGS': (
+            f'--xla_cpu_multi_thread_eigen=true '
+            f'intra_op_parallelism_threads={worker_count}'
+        ),
+    }
+
+
+def configure_thread_env(num_workers):
+    """Set CPU thread limits before NumPy/JAX/SOFIMA initialize their runtimes."""
+    for name, value in _limited_thread_env(num_workers).items():
+        os.environ.setdefault(name, value)
+
+
+def _preconfigure_thread_env_from_cli(argv=None):
+    """Apply ``--cores``/``-c`` limits early enough for imported native libraries."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('-c', '--cores', dest='num_workers', type=int)
+    args, _ = parser.parse_known_args(argv)
+    configure_thread_env(args.num_workers)
+
+
+_preconfigure_thread_env_from_cli()
+
 from emalign.align_xy.stitch_offgrid import stitch_images
 from emalign.io.progress import get_mongo_client, get_mongo_db, log_progress, wipe_progress
 from emalign.io.store import write_data, open_store
@@ -468,7 +505,7 @@ def build_parser():
                         required=False,
                         default=1,
                         type=int,
-                        help='Number of threads to use for rendering. Default: 1')
+                        help='Number of threads to use for rendering and imported native CPU thread pools. Default: 1')
     parser.add_argument('--scale',
                         dest='scale',
                         type=float,
