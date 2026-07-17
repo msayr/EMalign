@@ -49,7 +49,8 @@ def align_stack_xy(output_path,
                    mongodb_config_filepath=None,
                    num_cores=1,
                    overwrite=False,
-                   wipe_progress_flag=False):
+                   wipe_progress_flag=False,
+                   use_stage_positions=False):
     
     '''Align and stitch image stack in XY. 
 
@@ -73,6 +74,8 @@ def align_stack_xy(output_path,
     client = get_mongo_client(mongodb_config_filepath)
     db = get_mongo_db(client, project_name)
     io_backend = get_io_backend(io_mode)
+    if use_stage_positions and io_mode != 'sbem_image':
+        raise ValueError('Stage-position assisted XY alignment is only available in sbem_image mode')
 
     if wipe_progress_flag:
         logging.info(f"Wiping progress for stack: {stack_name}")
@@ -154,6 +157,16 @@ def align_stack_xy(output_path,
         pbar.set_description(f'{stack.stack_name}: Loading tile_map...')
         tm = stack.get_tile_map(z, apply_gaussian, apply_clahe)
         tile_map = tm.tile_map
+        tile_origins = None
+        if use_stage_positions:
+            stage_origins = io_backend.get_stage_origins(tm.tile_map_paths)
+            y_res, x_res = resolution
+            min_y = min(y for y, _ in stage_origins.values())
+            min_x = min(x for _, x in stage_origins.values())
+            tile_origins = {
+                tile_pos: ((stage_y - min_y) / y_res, (stage_x - min_x) / x_res)
+                for tile_pos, (stage_y, stage_x) in stage_origins.items()
+            }
         
         metadata = {}
         if len(tile_map) > 1:
@@ -176,7 +189,8 @@ def align_stack_xy(output_path,
                                                         tm.tile_space,
                                                         overlap=overlap,
                                                         overlap_pad=80,
-                                                        overlap_cap=1000
+                                                        overlap_cap=1000,
+                                                        tile_origins=tile_origins
                                                     )
 
                 if overlap > 160:

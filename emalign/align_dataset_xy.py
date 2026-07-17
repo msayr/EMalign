@@ -65,6 +65,7 @@ def align_dataset_xy(config_path,
     apply_clahe     = main_config['apply_clahe']
     stack_configs   = main_config['stack_configs']
     io_mode         = main_config['io_mode']
+    use_stage_positions = main_config.get('use_sbem_stage_positions', False)
 
     if not output_path.endswith('.zarr'):
         raise RuntimeError('Output path must be a zarr container (.zarr)')
@@ -101,7 +102,8 @@ def align_dataset_xy(config_path,
                        mongodb_config_filepath=mongodb_config_filepath,
                        num_cores=num_workers,
                        overwrite=overwrite,
-                       wipe_progress_flag=wipe_this_stack)
+                       wipe_progress_flag=wipe_this_stack,
+                       use_stage_positions=use_stage_positions)
     logging.info(f'Done! Output can be found at: {output_path}')
     
 

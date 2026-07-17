@@ -12,6 +12,7 @@ FILE_EXT = ".tif"
 _TILE_YX_POS = {}
 _TILE_YX_SOURCE = None
 _TILE_YX_PROJECT_ROOT = None
+_TILE_STAGE_POS = {}
 
 
 def _clean_resolution(v):
@@ -281,7 +282,7 @@ def _build_tile_yx_pos_map_from_imagelist(imagelist_path):
             entries.append((fname, tile_key, y, x))
 
     if not entries:
-        return {}
+        return {}, {}
 
     y_vals = sorted({y for _, _, y, _ in entries})
     y_to_row = {y: i for i, y in enumerate(y_vals)}
@@ -307,19 +308,23 @@ def _build_tile_yx_pos_map_from_imagelist(imagelist_path):
         entry_cols = {fname: col - min_col for fname, col in entry_cols.items()}
 
     tile_map = {}
+    stage_map = {}
 
     for fname, tile_key, y, x in entries:
         pos = (y_to_row[y], entry_cols[fname])
+        stage_pos = (y, x)
         tile_map[fname] = pos
+        stage_map[fname] = stage_pos
 
         if tile_key is not None:
             tile_map[tile_key] = pos
+            stage_map[tile_key] = stage_pos
 
-    return tile_map
+    return tile_map, stage_map
 
 
 def _ensure_tile_yx_pos_map(n):
-    global _TILE_YX_POS, _TILE_YX_SOURCE, _TILE_YX_PROJECT_ROOT
+    global _TILE_YX_POS, _TILE_YX_SOURCE, _TILE_YX_PROJECT_ROOT, _TILE_STAGE_POS
 
     lookup_keys = _lookup_keys(n)
     project_root = _find_project_root(n)
@@ -344,10 +349,11 @@ def _ensure_tile_yx_pos_map(n):
         raise FileNotFoundError(f"No imagelist_*.txt files found in {logs_dir}")
 
     for imagelist_path in imagelist_files:
-        tile_map = _build_tile_yx_pos_map_from_imagelist(imagelist_path)
+        tile_map, stage_map = _build_tile_yx_pos_map_from_imagelist(imagelist_path)
 
         if any(key in tile_map for key in lookup_keys):
             _TILE_YX_POS = tile_map
+            _TILE_STAGE_POS = stage_map
             _TILE_YX_SOURCE = imagelist_path
             _TILE_YX_PROJECT_ROOT = project_root
             return
@@ -374,6 +380,26 @@ def parse_yx_pos_from_name(n):
     raise KeyError(
         f"No tile position found for {_basename(n)!r} in {_TILE_YX_SOURCE}"
     )
+
+
+def get_stage_origin_from_name(n):
+    """Return raw SBEM Image stage origin as (y, x) for a tile image."""
+
+    _ensure_tile_yx_pos_map(n)
+
+    for key in _lookup_keys(n):
+        if key in _TILE_STAGE_POS:
+            return _TILE_STAGE_POS[key]
+
+    raise KeyError(
+        f"No stage origin found for {_basename(n)!r} in {_TILE_YX_SOURCE}"
+    )
+
+
+def get_stage_origins(tile_map_paths):
+    """Return stage origins keyed by tile position for an SBEM Image tile map."""
+
+    return {tile_pos: get_stage_origin_from_name(path) for tile_pos, path in tile_map_paths.items()}
 
 
 def parse_slice_from_name(n):
