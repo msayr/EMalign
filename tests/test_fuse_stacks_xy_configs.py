@@ -148,3 +148,48 @@ def test_early_core_parser_does_not_treat_config_flag_as_cores():
     assert module._extract_cores_arg([
         '-cfg', '/tmp/main_config.json',
     ]) is None
+
+
+def test_create_configs_keeps_z_overlap_group_together_when_sift_is_disconnected(monkeypatch, tmp_path):
+    _install_import_stubs()
+    prep = importlib.import_module('emalign.align_xy.prep')
+
+    class FakeKvStore:
+        def __init__(self, path):
+            self.path = path
+
+    class FakeDataset:
+        def __init__(self, path):
+            self.kvstore = FakeKvStore(path)
+            self.shape = (5, 4, 4)
+
+    datasets = [
+        FakeDataset('/tmp/output/xy_intermediate/01_g0000_t0000/'),
+        FakeDataset('/tmp/output/xy_intermediate/01_g0000_t0001/'),
+        FakeDataset('/tmp/output/xy_intermediate/01_g0008_t0000/'),
+    ]
+
+    monkeypatch.setattr(
+        prep,
+        'get_ordered_datasets',
+        lambda *args, **kwargs: (datasets, prep.np.array([[10], [10], [10]])),
+    )
+    monkeypatch.setattr(prep, 'get_store_attributes', lambda ds: {'resolution': [50, 50]})
+    monkeypatch.setattr(prep, 'find_ref_slice', lambda ds, z: (prep.np.zeros((4, 4)), None))
+    monkeypatch.setattr(prep, 'resample', lambda img, scale: img)
+
+    def fake_estimate_transform_sift(*args, **kwargs):
+        return None, None, False, None
+
+    monkeypatch.setattr(prep, 'estimate_transform_sift', fake_estimate_transform_sift)
+
+    main_config_path = tmp_path / 'main_config.json'
+    main_config_path.write_text('{"resolution": [50, 50]}')
+
+    configs = prep.create_configs_fused_stacks(str(main_config_path))
+
+    assert len(configs) == 1
+    assert configs[0]['dataset_paths'] == [dataset.kvstore.path for dataset in datasets]
+    assert configs[0]['z_offsets'] == [10, 10, 10]
+    assert configs[0]['zmin'] == 10
+    assert configs[0]['zmax'] == 15

@@ -328,33 +328,37 @@ def create_configs_fused_stacks(main_config_path,
                 pair_record['error'] = str(exc)
             group_record['pairwise_sift'].append(pair_record)
 
-        connected_components = [sorted(cc) for cc in nx.connected_components(G) if len(cc) > 1]
-        if not connected_components:
-            connected_components = [indices]
-            group_record['status'] = 'fallback_z_overlap_without_valid_sift'
+        connected_components = [sorted(cc) for cc in nx.connected_components(G)]
+        group_record['valid_sift_components'] = [
+            {
+                'dataset_indices': cc,
+                'dataset_names': [_dataset_debug_name(datasets[i]) for i in cc],
+            }
+            for cc in connected_components
+        ]
+        if len(connected_components) > 1:
+            group_record['status'] = 'created_from_z_overlap_with_disconnected_sift_components'
             group_record['reason'] = (
-                'No pair passed the SIFT robustness threshold during fuse config discovery. '
-                'A fallback config was created for all datasets in this Z-overlap group so '
-                'the stitch step can run and report per-slice load/stitch diagnostics.'
+                'Some datasets in this Z-overlap group did not pass the pairwise SIFT '
+                'robustness threshold, but fuse configs are grouped by Z overlap rather '
+                'than by SIFT connectivity so all tiles from the substack are fused together.'
             )
             logging.warning(
-                'No valid SIFT pair found while discovering fuse configs for z=%s-%s; '
-                'creating fallback fuse config for %s. See fuse_xy_diagnostics.json.',
-                z, int(group.z.max()) + 1, group_record['dataset_names'],
+                'SIFT connectivity split z=%s-%s into %s components; creating one fuse config '
+                'for all Z-overlapping datasets. See fuse_xy_diagnostics.json.',
+                z, int(group.z.max()) + 1, len(connected_components),
             )
         else:
-            group_record['status'] = 'created_from_valid_sift_components'
+            group_record['status'] = 'created_from_z_overlap'
 
-        # Valid matches are chained in case there are more than 2 matches for a range
-        for cc in connected_components:
-            config = {
-                'dataset_paths': [datasets[i].kvstore.path for i in cc], 
-                'z_offsets': [int(z_offsets[i,0]) for i in cc],
-                'zmin': int(z), 
-                'zmax': int(group.z.max()) + 1 # Exclusive max
-                } 
-            fused_configs.append(config)
-            group_record['created_configs'].append(config)
+        config = {
+            'dataset_paths': [datasets[i].kvstore.path for i in indices],
+            'z_offsets': [int(z_offsets[i, 0]) for i in indices],
+            'zmin': int(z),
+            'zmax': int(group.z.max()) + 1,  # Exclusive max
+        }
+        fused_configs.append(config)
+        group_record['created_configs'].append(config)
 
         diagnostics['groups'].append(group_record)
 
