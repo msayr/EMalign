@@ -205,8 +205,7 @@ def fuse_stacks_group(config,
                       overwrite=False,
                       wipe_progress_flag=False,
                       retry_missing_slices=True,
-                      num_workers=1,
-                      max_canvas_scale=1.5):
+                      num_workers=1):
     '''Fuse a group of stacks that overlap on the XY plane.
 
     Args:
@@ -226,8 +225,6 @@ def fuse_stacks_group(config,
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records.
             If False, any slice with an existing progress record is skipped. Defaults to True.
         num_workers (int, optional): Number of threads used to render the final image by `sofima.warp.ndimage_warp`. Defaults to 1.
-        max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the
-            larger input image. Set to None to disable. Defaults to 1.5.
     '''
 
 
@@ -388,7 +385,7 @@ def fuse_stacks_group(config,
                                                     parallelism=num_workers,
                                                     img_on_top=img_on_top,
                                                     img_q_fun=img_q_fun,
-                                                    max_canvas_scale=max_canvas_scale,
+                                                    max_canvas_scale=None,
                                                     k0=k0,
                                                     k=k,
                                                     gamma=gamma)
@@ -426,8 +423,7 @@ def fuse_stacks_group(config,
             'failed_images': failed_images,
             'failed_alignment_log_path': failed_alignment_log_path,
             'scale': scale,
-            'img_on_top': img_on_top,
-            'max_canvas_scale': max_canvas_scale
+            'img_on_top': img_on_top
                 }
         log_progress(db, destination_name, step_name, global_slice_index, z, metadata)
 
@@ -450,8 +446,7 @@ def align_fused_stacks_xy(config_path,
                           overwrite=False,
                           wipe_progress_stack=None,
                           retry_missing_slices=True,
-                          num_workers=1,
-                          max_canvas_scale=1.5):
+                          num_workers=1):
     '''Align groups of overlapping stacks one after the other.
 
     Args:
@@ -464,7 +459,6 @@ def align_fused_stacks_xy(config_path,
         wipe_progress_stack (str, optional): Name of the stack to wipe progress for. Defaults to None.
         retry_missing_slices (bool): Whether to retry slices with incomplete progress records. Defaults to True.
         num_workers (int, optional): _description_. Defaults to 1.
-        max_canvas_scale (float or None, optional): Maximum fused canvas shape as a multiple of the larger input image.
     '''
     
     with open(config_path, 'r') as f:
@@ -504,8 +498,7 @@ def align_fused_stacks_xy(config_path,
                           overwrite=overwrite,
                           wipe_progress_flag=wipe_this_stack,
                           retry_missing_slices=retry_missing_slices,
-                          num_workers=num_workers,
-                          max_canvas_scale=max_canvas_scale)
+                          num_workers=num_workers)
     logging.info(f'All {len(fused_configs)} stacks were fused!')
 
 
@@ -555,11 +548,6 @@ def build_parser():
                         action='store_false',
                         help='Skip slices with any existing progress record, including incomplete slices. Default: retry incomplete slices.')
     parser.set_defaults(retry_missing_slices=True)
-    parser.add_argument('--max-canvas-scale',
-                        dest='max_canvas_scale',
-                        type=float,
-                        default=1.5,
-                        help='Maximum fused XY canvas shape as a multiple of the larger input image. Default: 1.5')
     return parser
 
 
@@ -575,8 +563,7 @@ def main():
                           num_workers=args.num_workers,
                           overwrite=args.overwrite,
                           wipe_progress_stack=args.wipe_progress_stack,
-                          retry_missing_slices=args.retry_missing_slices,
-                          max_canvas_scale=args.max_canvas_scale)
+                          retry_missing_slices=args.retry_missing_slices)
 
 
 if __name__ == '__main__':

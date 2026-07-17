@@ -77,6 +77,7 @@ def test_build_parser_exposes_fusion_parameter_overrides():
     assert args.patch_size == 96
     assert args.stride == 24
     assert args.img_on_top == '2'
+    assert 'max_canvas_scale' not in vars(args)
 
 
 def test_main_passes_fusion_parameter_overrides(monkeypatch):
