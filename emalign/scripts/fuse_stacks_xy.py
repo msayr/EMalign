@@ -2,7 +2,7 @@ import argparse
 import json
 import logging
 import os
-from emalign.align_xy.stitch_offgrid import stitch_images
+from emalign.align_xy.stitch_offgrid import StitchTransformError, stitch_images
 from emalign.io.progress import get_mongo_client, get_mongo_db, log_progress, check_progress, wipe_progress
 from emalign.io.store import write_data, open_store
 import tensorstore as ts
@@ -17,6 +17,14 @@ from emalign.io.process.mask import compute_greyscale_mask
 
 
 # TODO: add a first slice test to make sure it is not missing images
+
+
+def _dataset_path(dataset):
+    """Return a readable TensorStore path for diagnostics."""
+    try:
+        return dataset.spec().to_json().get('kvstore', {}).get('path', 'unknown')
+    except Exception:
+        return 'unknown'
 
 
 def get_fused_configs(
@@ -231,7 +239,11 @@ def fuse_stacks_group(config,
                 print()
                 print()
                 print()
-                print(f'Error in stack (z = {z}): {stack}')
+                print(f'Error in stack (local z = {z}, global z = {global_slice_index}): {stack}')
+                if isinstance(e, StitchTransformError):
+                    raise StitchTransformError(
+                        f'{e} Failing stack path: {_dataset_path(stack.get("dataset"))}'
+                    ) from e
                 raise(e)
             
 
