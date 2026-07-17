@@ -7,6 +7,11 @@ import cv2
 import numpy as np
 import jax.numpy as jnp
 
+
+class StitchTransformError(RuntimeError):
+    """Raised when the coarse SIFT transform needed for off-grid stitching fails."""
+
+
 from connectomics.common import bounding_box
 from sofima import flow_field, flow_utils, mesh
 from sofima.warp import ndimage_warp
@@ -149,7 +154,19 @@ def stitch_images(img1,
     mask2 = mask2.astype(bool)
 
     # Estimate and apply transformation to reference image
-    M, img1_shape, img2_offset, _, _ = estimate_transform_sift(img2, img1, scale, refine_estimate=True)   
+    M, img1_shape, img2_offset, robust_estimate, robustness_metrics = estimate_transform_sift(
+        img2, img1, scale, refine_estimate=True
+    )
+    if M is None or img1_shape is None or img2_offset is None:
+        details = (
+            "Unable to estimate the coarse SIFT transform for off-grid stitching. "
+            "This usually means the two stacks have too little valid overlap, too few "
+            "features in the overlapping region, or a bad/mismatched XY fuse config. "
+            f"scale={scale}, img1_shape={img1.shape}, img2_shape={img2.shape}, "
+            f"mask1_pixels={int(mask1.sum())}, mask2_pixels={int(mask2.sum())}, "
+            f"robust_estimate={robust_estimate}, metrics={robustness_metrics}"
+        )
+        raise StitchTransformError(details)
     img1 = cv2.warpAffine(img1, M, img1_shape[::-1])  
     mask1 = cv2.warpAffine(mask1.astype(np.uint8), M, img1_shape[::-1]).astype(bool)
 
