@@ -18,11 +18,21 @@ Convert a final aligned zarr container to a lossless TIFF image series.
 Each z slice is written as one uncompressed .tiff file. The source dtype and
 pixel values are preserved exactly; no scaling, normalization, compression, or
 other lossy processing is applied.
+
+CLI range options use Python-style half-open intervals: the start coordinate is
+included and the end coordinate is excluded. For example, ``--slice-range 5 10``
+writes z slices 5, 6, 7, 8, and 9. Passing a single z index such as
+``--slice-range 5`` writes from slice 5 through the final slice.
 """
 
 
 def _normalize_slice_range(slice_range, z_size):
-    """Validate and normalize an optional [start, end] slice range."""
+    """Validate and normalize an optional z slice range.
+
+    The range follows Python slicing semantics: start is included and end is
+    excluded. A single start value means export from that z slice to the end of
+    the volume.
+    """
     if slice_range is None:
         return [0, z_size]
     if len(slice_range) == 1:
@@ -113,7 +123,9 @@ def zarr_to_tiff_series(dataset_path,
     Args:
         dataset_path: Path to the aligned zarr dataset.
         output_path: Directory where .tiff files will be written.
-        slice_range: Optional [start, end] z slice interval. End is exclusive.
+        slice_range: Optional z range as [start] or [start, end]. Start is
+            inclusive and end is exclusive. Passing only start writes from that
+            z slice through the final slice.
         prefix: Filename prefix for each TIFF.
         digits: Zero-padding width for z indices in filenames.
         num_threads: Number of concurrent slice-writing threads.
@@ -200,12 +212,17 @@ if __name__ == '__main__':
                         type=str,
                         help='Output directory for the TIFF image series.')
     parser.add_argument('-z', '--slice-range',
-                        metavar='SLICE_RANGE',
+                        metavar='Z',
                         dest='slice_range',
                         nargs='+',
                         type=int,
                         default=None,
-                        help='Slice range [start end], where end is exclusive (default: all slices).')
+                        help=(
+                            'Optional z slice range. Pass either START to write from that z slice '
+                            'through the final slice, or START END to write the half-open interval '
+                            '[START, END), including START and excluding END. Example: '
+                            '--slice-range 5 10 writes slices 5, 6, 7, 8, and 9. Default: all slices.'
+                        ))
     parser.add_argument('--prefix',
                         metavar='PREFIX',
                         dest='prefix',
