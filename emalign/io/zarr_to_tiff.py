@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -26,6 +27,34 @@ writes z slices 5, 6, 7, 8, and 9. Passing a single z index such as
 """
 
 
+def _parse_coordinate_values(values, value_name):
+    """Parse integer coordinate values from CLI or programmatic inputs."""
+    if values is None:
+        return None
+
+    parsed_values = []
+    for value in values:
+        if isinstance(value, str):
+            tokens = [
+                token for token in re.split(r'[\s,]+', value.strip('()[] '))
+                if token
+            ]
+            try:
+                parsed_values.extend(int(token) for token in tokens)
+            except ValueError as err:
+                raise ValueError(
+                    f'{value_name} values must be integers: {value!r}'
+                ) from err
+        else:
+            try:
+                parsed_values.append(int(value))
+            except ValueError as err:
+                raise ValueError(
+                    f'{value_name} values must be integers: {value!r}'
+                ) from err
+    return parsed_values
+
+
 def _normalize_slice_range(slice_range, z_size):
     """Validate and normalize an optional z slice range.
 
@@ -33,6 +62,7 @@ def _normalize_slice_range(slice_range, z_size):
     excluded. A single start value means export from that z slice to the end of
     the volume.
     """
+    slice_range = _parse_coordinate_values(slice_range, 'Slice range')
     if slice_range is None:
         return [0, z_size]
     if len(slice_range) == 1:
@@ -55,6 +85,7 @@ def _validate_slice_range(slice_range, z_size):
 
 def _normalize_crop(crop):
     """Validate and normalize an optional x-y crop rectangle."""
+    crop = _parse_coordinate_values(crop, 'Crop')
     if crop is None:
         return None
     if len(crop) == 2:
@@ -215,7 +246,6 @@ if __name__ == '__main__':
                         metavar='Z',
                         dest='slice_range',
                         nargs='+',
-                        type=int,
                         default=None,
                         help=(
                             'Optional z slice range. Pass either START to write from that z slice '
@@ -245,11 +275,11 @@ if __name__ == '__main__':
                         metavar='COORD',
                         dest='crop',
                         nargs='+',
-                        type=int,
                         default=None,
                         help=(
                             'Optional x-y crop rectangle. Pass either "x_max y_max" to crop from '
-                            '(0, 0), or "x_min y_min x_max y_max". Maximum coordinates are exclusive.'
+                            '(0, 0), or "x_min y_min x_max y_max". Coordinates may be passed '
+                            'as separate values or one quoted string. Maximum coordinates are exclusive.'
                         ))
     parser.add_argument('--overwrite',
                         dest='overwrite',
@@ -257,4 +287,7 @@ if __name__ == '__main__':
                         help='Overwrite existing TIFF files in the output directory.')
 
     args = parser.parse_args()
-    zarr_to_tiff_series(**vars(args))
+    try:
+        zarr_to_tiff_series(**vars(args))
+    except ValueError as err:
+        parser.error(str(err))
