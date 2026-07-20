@@ -76,7 +76,8 @@ def load_configs_from_files(config_paths, exclude):
 
 def create_alignment_configs(datasets, z_offsets, output_configs_dir, config_z, reference_path, 
                              reference_offset, destination_path, project_name, mongodb_config_filepath,
-                             yx_target_resolution, save_downsampled):
+                             yx_target_resolution, save_downsampled, verify_path_sift=False,
+                             estimate_padding_sift=False, path_sift_max_features=50000):
     '''Create alignment configuration files for all datasets.
 
     Args:
@@ -101,18 +102,29 @@ def create_alignment_configs(datasets, z_offsets, output_configs_dir, config_z, 
         # Some stacks may be disconnected in some parts of the dataset
         logging.info('Computing alignment path...')
         root_stack, paths, reverse_order, ds_bounds = compute_alignment_path(
-            datasets, z_offsets, target_resolution=yx_target_resolution)
+            datasets, z_offsets, target_resolution=yx_target_resolution,
+            verify_sift=verify_path_sift,
+            path_sift_max_features=path_sift_max_features)
         
         # Determine where to start to ensure that everything fits within the canvas
-        logging.info('Computing padding...')
-        root_offset = determine_initial_offset(datasets, paths)
+        if estimate_padding_sift:
+            logging.info('Computing padding...')
+            root_offset = determine_initial_offset(datasets, paths)
+        else:
+            logging.info(
+                'Skipping SIFT-based padding estimate; using zero drift plus fixed pad. '
+                'Pass --estimate-padding-sift to restore the previous behavior.'
+            )
+            root_offset = np.array([0, 0])
         pad_offset = PAD_OFFSET.copy()  # pad offsets to correct for any drift
         root_offset += pad_offset
         ref_bboxes = None
     else:
         logging.info('Computing alignment path...')
         root_stack, paths, reverse_order, ds_bounds = compute_alignment_path(
-            datasets, z_offsets, target_resolution=yx_target_resolution)
+            datasets, z_offsets, target_resolution=yx_target_resolution,
+            verify_sift=verify_path_sift,
+            path_sift_max_features=path_sift_max_features)
         
         # There is a reference dataset so we need to figure out the global offset relative to it
         logging.info('Computing padding...')
@@ -244,6 +256,9 @@ def prep_config_z(project_dir: str,
                   destination_path: Optional[str] = None,
                   exclude: List[str] = None,
                   save_downsampled: float = 10,
+                  verify_path_sift: bool = False,
+                  estimate_padding_sift: bool = False,
+                  path_sift_max_features: int = 50000,
                   force_overwrite: bool = False) -> str:
     '''Generate Z alignment configuration files.
 
@@ -254,6 +269,9 @@ def prep_config_z(project_dir: str,
         destination_path: Path to output zarr (optional, derived from config if not provided)
         exclude: List of patterns to exclude from datasets
         save_downsampled: Downsampling factor for inspection store
+        verify_path_sift: Whether to verify alignment path edges with SIFT
+        estimate_padding_sift: Whether to estimate XY padding drift with SIFT
+        path_sift_max_features: SIFT feature cap for alignment path checks
         force_overwrite: Whether to overwrite existing configs
 
     Returns:
@@ -336,7 +354,9 @@ def prep_config_z(project_dir: str,
     root_stack, paths, reverse_order, root_offset = create_alignment_configs(
         datasets, z_offsets, output_configs_dir, config_z, reference_path, reference_offset,
         destination_path, project_name, mongodb_config_filepath,
-        yx_target_resolution, save_downsampled
+        yx_target_resolution, save_downsampled, verify_path_sift=verify_path_sift,
+        estimate_padding_sift=estimate_padding_sift,
+        path_sift_max_features=path_sift_max_features
     )
 
     # Validate created configs
@@ -424,6 +444,26 @@ if __name__ == '__main__':
                         action='store_true',
                         default=False,
                         help='Force overwrite of existing config files. Default: user is prompted if configs exist')
+    parser.add_argument('--verify-path-sift',
+                        dest='verify_path_sift',
+                        action='store_true',
+                        default=False,
+                        help='Verify alignment-path edges with SIFT during config preparation. '
+                             'Default: infer the path from Z-overlap only, which avoids expensive '
+                             'SIFT work before configs are written.')
+    parser.add_argument('--estimate-padding-sift',
+                        dest='estimate_padding_sift',
+                        action='store_true',
+                        default=False,
+                        help='Estimate initial XY padding with SIFT during config preparation. '
+                             'Default: use the fixed safety pad only, which avoids another expensive '
+                             'pre-alignment SIFT pass.')
+    parser.add_argument('--path-sift-max-features',
+                        dest='path_sift_max_features',
+                        type=int,
+                        default=50000,
+                        help='Maximum number of SIFT features to retain per image for --verify-path-sift. '
+                             'Default: 50000.')
 
     args = parser.parse_args()
 

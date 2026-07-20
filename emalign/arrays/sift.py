@@ -187,7 +187,8 @@ def estimate_transform_sift(ref_img,
                             mov_mask=None,
                             refine_estimate=True,
                             return_upscaled_matrix=True,
-                            return_raw_homology=False):
+                            return_raw_homology=False,
+                            max_features=250000):
     '''Estimate transformation (xy offset and rotation) from img2 to img1 using SIFT.
     Note that using masks may marginally increase compute time.
 
@@ -197,6 +198,8 @@ def estimate_transform_sift(ref_img,
         scale (float, optional): Scale to resample images to for computing the offset. Defaults to 1.
         refine_estimate (bool, optional): Whether to try again with higher resolution if the first estimate is found to be invalid. Defaults to True.
         return_upscaled_matrix (bool, optional): Whether to return the matrix corresponding to the transformation to apply to the original image (as opposed to the resampled one). Defaults to True.
+        return_raw_homology (bool, optional): Whether to return the raw affine matrix without adjusting output shape. Defaults to False.
+        max_features (int, optional): Maximum number of SIFT features to retain. Defaults to 250000.
         ref_mask (np.ndarray): Boolean mask for the regions to find keypoints in for the reference greyscale image. Defaults to None.
         mov_mask (np.ndarray): Boolean mask for the regions to find keypoints in for the the moving greyscale image. Defaults to None.
 
@@ -209,7 +212,6 @@ def estimate_transform_sift(ref_img,
             robustness_metrics (dict): Dictionary of various metrics used to determine the robustness of the estimate.
     '''
     # knnMatch will return an error if there are too many keypoints so we limit their number
-    max_features=250000
 
     # resample images for faster computations
     ds_ref_img = resample(ref_img, scale)
@@ -270,7 +272,16 @@ def estimate_transform_sift(ref_img,
             M, output_shape, ref_offset = adjust_matrix_to_shape(mov_img, M)
         
     if refine_estimate and not robust_estimate and scale<0.9:
-        return estimate_transform_sift(ref_img, mov_img, scale=scale+0.1, refine_estimate=False)
+        return estimate_transform_sift(
+            ref_img,
+            mov_img,
+            scale=scale+0.1,
+            ref_mask=ref_mask,
+            mov_mask=mov_mask,
+            refine_estimate=False,
+            return_upscaled_matrix=return_upscaled_matrix,
+            return_raw_homology=return_raw_homology,
+            max_features=max_features)
     else:
         if ref_offset is not None:
             ref_offset = ref_offset.astype(int)
