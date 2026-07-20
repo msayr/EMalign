@@ -43,12 +43,46 @@ def _validate_slice_range(slice_range, z_size):
         raise ValueError(f'Slice range {slice_range} is outside z dimension 0:{z_size}.')
 
 
+def _normalize_crop(crop):
+    """Validate and normalize an optional x-y crop rectangle."""
+    if crop is None:
+        return None
+    if len(crop) == 2:
+        x0, y0 = 0, 0
+        x1, y1 = crop
+    elif len(crop) == 4:
+        x0, y0, x1, y1 = crop
+    else:
+        raise ValueError(
+            'Crop must have 2 elements ([x_max y_max]) or 4 elements '
+            '([x_min y_min x_max y_max]).'
+        )
+    return [x0, y0, x1, y1]
+
+
+def _validate_crop(crop, y_size, x_size):
+    """Validate that a crop rectangle is inside the x-y image plane."""
+    if crop is None:
+        return
+    x0, y0, x1, y1 = crop
+    if any(value < 0 for value in crop):
+        raise ValueError('Crop coordinates must be non-negative.')
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(
+            'Invalid crop: bottom-right coordinate must be below and to the right of top-left.'
+        )
+    if x1 > x_size or y1 > y_size:
+        raise ValueError(
+            f'Crop {crop} is outside x-y dimensions x=0:{x_size}, y=0:{y_size}.'
+        )
+
+
 def _format_tiff_path(output_path, prefix, z_index, digits):
     """Build the output path for a single TIFF slice."""
     return os.path.join(output_path, f'{prefix}{z_index:0{digits}d}.tiff')
 
 
-def _write_tiff_slice(dataset, z_index, output_path, prefix, digits, overwrite):
+def _write_tiff_slice(dataset, z_index, output_path, prefix, digits, overwrite, crop):
     """Read one zarr slice and write it as an uncompressed TIFF."""
     output_file = _format_tiff_path(output_path, prefix, z_index, digits)
     if os.path.exists(output_file) and not overwrite:
@@ -58,6 +92,9 @@ def _write_tiff_slice(dataset, z_index, output_path, prefix, digits, overwrite):
 
     data = dataset[z_index].read().result()
     data = np.asarray(data)
+    if crop is not None:
+        x0, y0, x1, y1 = crop
+        data = data[..., y0:y1, x0:x1]
     imwrite(output_file, data, compression=None)
     return output_file
 
@@ -68,7 +105,8 @@ def zarr_to_tiff_series(dataset_path,
                         prefix='slice_',
                         digits=6,
                         num_threads=1,
-                        overwrite=False):
+                        overwrite=False,
+                        crop=None):
     """
     Convert a zarr dataset into an uncompressed TIFF image series.
 
@@ -80,6 +118,8 @@ def zarr_to_tiff_series(dataset_path,
         digits: Zero-padding width for z indices in filenames.
         num_threads: Number of concurrent slice-writing threads.
         overwrite: Whether to overwrite existing output TIFF files.
+        crop: Optional x-y crop rectangle as [x_max, y_max] or
+            [x_min, y_min, x_max, y_max]. Maximum coordinates are exclusive.
     """
     os.makedirs(output_path, exist_ok=True)
 
@@ -100,10 +140,16 @@ def zarr_to_tiff_series(dataset_path,
     _validate_slice_range(slice_range, dataset.shape[0])
     start, end = slice_range
 
+    crop = _normalize_crop(crop)
+    _validate_crop(crop, dataset.shape[-2], dataset.shape[-1])
+
     logging.info(f'Input zarr: {dataset_path}')
     logging.info(f'Input shape: {dataset.shape}')
     logging.info(f'Input dtype: {dataset.dtype}')
     logging.info(f'Writing slices {start}:{end} as uncompressed TIFF image series')
+    if crop is not None:
+        x0, y0, x1, y1 = crop
+        logging.info(f'Cropping x-y rectangle: x={x0}:{x1}, y={y0}:{y1}')
     logging.info(f'Output directory: {output_path}')
 
     z_indices = list(range(start, end))
@@ -111,8 +157,9 @@ def zarr_to_tiff_series(dataset_path,
         raise ValueError('Number of threads must be at least 1.')
 
     if num_threads == 1:
-        for z_index in tqdm(z_indices, desc='Writing TIFF slices', unit='slices', dynamic_ncols=True):
-            _write_tiff_slice(dataset, z_index, output_path, prefix, digits, overwrite)
+        for z_index in tqdm(
+                z_indices, desc='Writing TIFF slices', unit='slices', dynamic_ncols=True):
+            _write_tiff_slice(dataset, z_index, output_path, prefix, digits, overwrite, crop)
     else:
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = [
@@ -124,10 +171,13 @@ def zarr_to_tiff_series(dataset_path,
                     prefix,
                     digits,
                     overwrite,
+                    crop,
                 )
                 for z_index in z_indices
             ]
-            for future in tqdm(as_completed(futures), total=len(futures), desc='Writing TIFF slices', unit='slices', dynamic_ncols=True):
+            for future in tqdm(
+                    as_completed(futures), total=len(futures),
+                    desc='Writing TIFF slices', unit='slices', dynamic_ncols=True):
                 future.result()
 
     logging.info('Done!')
@@ -174,6 +224,16 @@ if __name__ == '__main__':
                         type=int,
                         default=1,
                         help='Number of concurrent writer threads (default: 1).')
+    parser.add_argument('--crop',
+                        metavar='COORD',
+                        dest='crop',
+                        nargs='+',
+                        type=int,
+                        default=None,
+                        help=(
+                            'Optional x-y crop rectangle. Pass either "x_max y_max" to crop from '
+                            '(0, 0), or "x_min y_min x_max y_max". Maximum coordinates are exclusive.'
+                        ))
     parser.add_argument('--overwrite',
                         dest='overwrite',
                         action='store_true',
