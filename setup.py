@@ -18,6 +18,7 @@ setup(
             'pandas',
             'networkx',
             'opencv-python',
+            'tifffile',
             'tensorstore',
             'scipy',
             'pymongo',
