@@ -220,6 +220,7 @@ def tiff_series_to_pyramid(input_path: str,
         raise NotImplementedError('Downsample factor different from 2 is not implemented.')
 
     tiff_paths = collect_tiff_paths(input_path, pattern)
+    output_slice_map = {str(output_z): tiff_path for output_z, tiff_path in enumerate(tiff_paths)}
 
     output_path = os.path.join(output_path, 'pyramid')
     os.makedirs(output_path, exist_ok=True)
@@ -231,6 +232,8 @@ def tiff_series_to_pyramid(input_path: str,
     rotation_angle = rotate % 360 if abs(rotate) > 360 else rotate
     resolution = resolution or [1, 1, 1]
     voxel_offset = voxel_offset or [0, 0, 0]
+
+    logging.info(f'Collected {len(tiff_paths)} TIFF slices; output z indices will be 0-{len(tiff_paths) - 1}.')
 
     tile_executor = ThreadPoolExecutor(max_workers=num_threads)
     slice_has_data = {}
@@ -302,6 +305,7 @@ def tiff_series_to_pyramid(input_path: str,
         'input_path': input_path,
         'pattern': pattern,
         'tiff_paths': tiff_paths,
+        'output_slice_map': output_slice_map,
         'max_layer': max_layer,
         'tile_shape': tile_shape,
         'downsample_factor': downsample_factor,
