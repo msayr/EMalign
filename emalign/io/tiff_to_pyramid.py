@@ -72,6 +72,25 @@ def create_CAVE_info_file(tile_shape, shape, resolution, voxel_offset, downsampl
     return {'data_type': 'uint8', 'num_channels': 1, 'scales': scales, 'type': 'image'}
 
 
+def create_metadata(shape, resolution, voxel_offset, units, missing_layers):
+    '''Create the metadata.json description consumed alongside the pyramid.'''
+    width, height, sections = shape
+    return {
+        'volume_width_px': width,
+        'volume_height_px': height,
+        'volume_sections': sections,
+        'extension': '.jpg',
+        'resolution_x': resolution[0],
+        'resolution_y': resolution[1],
+        'resolution_z': resolution[2],
+        'units': units,
+        'offset_x_px': voxel_offset[0],
+        'offset_y_px': voxel_offset[1],
+        'offset_z_px': voxel_offset[2],
+        'missing_layers': missing_layers,
+    }
+
+
 def write_single_tile(args):
     '''Write a single tile - runs in thread pool.'''
     filepath, tile, encode_params, jpeg_quality = args
@@ -213,6 +232,7 @@ def tiff_series_to_pyramid(input_path: str,
                            rotation_center: tuple = None,
                            resolution: list = None,
                            voxel_offset: list = None,
+                           units: str = 'nanometer',
                            jpeg_quality: int = 90,
                            skip_empty_tiles: bool = True) -> None:
     '''Convert a directory/glob of TIFF slices to CATMAID/CAVE-compatible pyramid tiles.'''
@@ -220,7 +240,6 @@ def tiff_series_to_pyramid(input_path: str,
         raise NotImplementedError('Downsample factor different from 2 is not implemented.')
 
     tiff_paths = collect_tiff_paths(input_path, pattern)
-    output_slice_map = {str(output_z): tiff_path for output_z, tiff_path in enumerate(tiff_paths)}
 
     output_path = os.path.join(output_path, 'pyramid')
     os.makedirs(output_path, exist_ok=True)
@@ -298,27 +317,12 @@ def tiff_series_to_pyramid(input_path: str,
     with open(os.path.join(output_path, 'info'), 'w') as f:
         json.dump(info, f, indent=2, cls=JsonNumpyEncoder)
 
-    if rotation_center is None:
-        rotation_center = [x / 2, y / 2]
-
-    info_pyramid = {
-        'input_path': input_path,
-        'pattern': pattern,
-        'tiff_paths': tiff_paths,
-        'output_slice_map': output_slice_map,
-        'max_layer': max_layer,
-        'tile_shape': tile_shape,
-        'downsample_factor': downsample_factor,
-        'rotation': rotate,
-        'rotation_center': rotation_center,
-        'duplicate_missing_slices': duplicate_missing_slices,
-        'duplicated_slices': copy_from,
-        'resolution_xyz': resolution,
-        'voxel_offset_xyz': voxel_offset,
-        'skip_empty_tiles': skip_empty_tiles,
-    }
-    with open(os.path.join(output_path, 'info_pyramid.json'), 'w') as f:
-        json.dump(info_pyramid, f, indent=2, cls=JsonNumpyEncoder)
+    missing_layers = [z for z in range(len(tiff_paths)) if not slice_has_data.get(z, False)]
+    metadata = create_metadata(
+        [x, y, len(tiff_paths)], resolution, voxel_offset, units, missing_layers
+    )
+    with open(os.path.join(output_path, 'metadata.json'), 'w') as f:
+        json.dump(metadata, f, indent=2, cls=JsonNumpyEncoder)
 
     logging.info('Done!')
     logging.info(f'Output written at: {output_path}')
@@ -336,8 +340,9 @@ if __name__ == '__main__':
     parser.add_argument('--error-missing', dest='duplicate_missing_slices', default=True, action='store_false', help='Raise on unreadable/empty slices instead of duplicating the last valid slice.')
     parser.add_argument('--rotate', dest='rotate', type=int, default=0, help='Rotation angle in degrees (default: 0).')
     parser.add_argument('--rotation-center', metavar=('X', 'Y'), dest='rotation_center', nargs=2, type=float, default=None, help='Rotation center for non-90-degree rotations.')
-    parser.add_argument('--resolution', metavar=('X', 'Y', 'Z'), dest='resolution', nargs=3, type=float, default=None, help='Voxel resolution for the info file, in XYZ order (default: 1 1 1).')
-    parser.add_argument('--voxel-offset', metavar=('X', 'Y', 'Z'), dest='voxel_offset', nargs=3, type=int, default=None, help='Voxel offset for the info file, in XYZ order (default: 0 0 0).')
+    parser.add_argument('--resolution', metavar=('X', 'Y', 'Z'), dest='resolution', nargs=3, type=float, default=None, help='Voxel resolution in XYZ order (default: 1 1 1 nanometers).')
+    parser.add_argument('--voxel-offset', metavar=('X', 'Y', 'Z'), dest='voxel_offset', nargs=3, type=float, default=None, help='Voxel offset in XYZ order (default: 0 0 0 pixels).')
+    parser.add_argument('--units', default='nanometer', help='Physical units for resolution values in metadata.json (default: nanometer).')
     parser.add_argument('--jpeg-quality', dest='jpeg_quality', type=int, default=90, help='JPEG quality 0-100 (default: 90).')
     parser.add_argument('--write-empty-tiles', dest='skip_empty_tiles', default=True, action='store_false', help='Write all-black tiles instead of matching zarr_to_pyramid.py by skipping them.')
 
