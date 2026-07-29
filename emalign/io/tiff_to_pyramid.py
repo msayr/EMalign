@@ -241,7 +241,6 @@ def tiff_series_to_pyramid(input_path: str,
 
     tiff_paths = collect_tiff_paths(input_path, pattern)
 
-    output_path = os.path.join(output_path, 'pyramid')
     os.makedirs(output_path, exist_ok=True)
     if os.path.exists(os.path.join(output_path, 'info')):
         response = input('An info file already exists. You risk overwriting data.\nY to continue or ENTER to exit: ').lower()
